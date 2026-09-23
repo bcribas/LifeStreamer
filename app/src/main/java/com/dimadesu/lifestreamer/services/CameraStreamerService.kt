@@ -250,6 +250,10 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
      * page and the phone could otherwise both open the endpoint.
      */
     private val streamControlMutex = kotlinx.coroutines.sync.Mutex()
+
+    /** Last orientation the sensor reported, or null before the first reading (e.g. lying flat). */
+    @Volatile
+    private var lastSensorRotation: Int? = null
     // Current outgoing video bitrate in bits per second (nullable when unknown)
     private val _currentBitrateFlow = MutableStateFlow<Int?>(null)
     val currentBitrateFlow = _currentBitrateFlow.asStateFlow()
@@ -377,6 +381,9 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                 val rotationProvider = SensorRotationProvider(this@CameraStreamerService)
                 val listener = object : IRotationProvider.Listener {
                     override fun onOrientationChanged(rotation: Int) {
+                        // Recorded before any of the early returns below: this is how the phone is
+                        // physically held, whatever is done with it afterwards.
+                        lastSensorRotation = rotation
                         // If stream rotation is locked (during streaming), ignore sensor changes
                         if (lockedStreamRotation != null) {
                             Log.i(TAG, "SENSOR: Ignoring rotation change to ${rotationToString(rotation)} - LOCKED to ${rotationToString(lockedStreamRotation!!)}")
@@ -1477,6 +1484,39 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
      * Mirrors the logic from PreviewViewModel.startStream(): open with timeout and attach regulator if needed.
      */
     /**
+     * Applies the stored video and audio configuration when the streamer has none.
+     *
+     * The ViewModel applies them, but defers both while its screen is not in the foreground, and
+     * only catches up when the screen comes back. So an app started -- or restarted after an update
+     * -- with the phone locked had no encoders at all: a start from the page failed with "Encoders
+     * not ready (video=false, audio=false)" and a composition turned on from the page came out
+     * empty. The phone on a windscreen is exactly that case. Not streaming here, so nothing on air
+     * is reconfigured; a later catch-up by the ViewModel applies the same values again.
+     */
+    private suspend fun ensureStreamerConfigured() {
+        val current = streamer
+        val videoStreamer = current as? IVideoSingleStreamer
+        if (videoStreamer != null && videoStreamer.videoConfigFlow.value == null) {
+            storageRepository.videoConfigFlow.first()?.let { config ->
+                runCatching { videoStreamer.setVideoConfig(config) }
+                    .onSuccess { Log.i(TAG, "Applied the stored video configuration (none was set)") }
+                    .onFailure { Log.w(TAG, "Could not apply the stored video configuration: ${it.message}") }
+            }
+        }
+        val audioStreamer = current as? io.github.thibaultbee.streampack.core.streamers.single.IAudioSingleStreamer
+        val micGranted = androidx.core.content.ContextCompat.checkSelfPermission(
+            this, android.Manifest.permission.RECORD_AUDIO
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (audioStreamer != null && audioStreamer.audioConfigFlow.value == null && micGranted) {
+            storageRepository.audioConfigFlow.first()?.let { config ->
+                runCatching { audioStreamer.setAudioConfig(config) }
+                    .onSuccess { Log.i(TAG, "Applied the stored audio configuration (none was set)") }
+                    .onFailure { Log.w(TAG, "Could not apply the stored audio configuration: ${it.message}") }
+            }
+        }
+    }
+
+    /**
      * Replaces the whole video source, the way the app's screen always did it: the bitrate
      * regulator is taken off first and put back after, and the previous source gets a moment to
      * release its camera before the new one opens it.
@@ -1494,6 +1534,10 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
 
         if (regulated) {
             runCatching { videoStreamer?.bitrateRegulatorControllerFactory = null }
+        }
+        if (!live) {
+            // A composition built without a video configuration has no canvas and no layers.
+            ensureStreamerConfigured()
         }
         delay(300)
         (streamer as io.github.thibaultbee.streampack.core.interfaces.IWithVideoSource).setVideoSource(factory)
@@ -1651,6 +1695,13 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                 // same orientation we started the stream in to avoid glitching the ingest server.
                 currentRotation = savedStreamingOrientation!!
                 Log.i(TAG, "startStreamFromConfiguredEndpoint: Reconnecting - Restoring saved orientation ${rotationToString(currentRotation)}")
+            } else if (lastSensorRotation != null) {
+                // This path starts a stream from outside the app's screen -- the notification or
+                // the remote page -- so the display's rotation says nothing about the phone: with
+                // the screen off or locked it is the lock screen's portrait. A phone mounted
+                // sideways on a windscreen went on air standing up. The sensor knows how it is held.
+                currentRotation = lastSensorRotation!!
+                Log.i(TAG, "startStreamFromConfiguredEndpoint: Using the physical orientation ${rotationToString(currentRotation)} from the sensor")
             } else {
                 detectCurrentRotation()
             }
@@ -1694,6 +1745,10 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                 reportStartFailure("Sources not initialized - open the app on the phone first", alwaysNotify = true)
                 return
             }
+
+            // Encoders are created from the configuration, which may never have been applied
+            // if the app started with the phone locked.
+            ensureStreamerConfigured()
 
             // Read configured endpoint descriptor
             val descriptor = try {
