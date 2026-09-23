@@ -1,6 +1,6 @@
 [submodule "StreamPack"]
 	path = StreamPack
-	url = git@github.com:dimadesu/StreamPack.git
+	url = git@github.com:bcribas/StreamPack.git
 [submodule "bond-bunny"]
 	path = bond-bunny
 	url = git@github.com:dimadesu/bond-bunny.git
