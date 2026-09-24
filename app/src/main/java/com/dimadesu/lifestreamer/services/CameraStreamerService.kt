@@ -169,8 +169,32 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
      */
     val recordingController by lazy {
         com.dimadesu.lifestreamer.recording.RecordingController(
-            this, recordingScope, storageRepository
-        ) { streamer }
+            this, recordingScope, storageRepository, { streamer }, liveCopyHost
+        )
+    }
+
+    /** The copy of the live taps the resilient SRT endpoint's TS. */
+    private val liveCopyHost = object : com.dimadesu.lifestreamer.recording.RecordingController.LiveCopyHost {
+        override suspend fun liveCopyBlockedReason(liveOpen: Boolean): String? {
+            val type = storageRepository.endpointTypeFlow.first()
+            if (type != com.dimadesu.lifestreamer.models.EndpointType.SRT &&
+                type != com.dimadesu.lifestreamer.models.EndpointType.SRTLA
+            ) {
+                return "Copy of the live needs an SRT or SRTLA endpoint: choose Separate quality"
+            }
+            // An open live keeps the endpoint it opened with; enabling the copy switches the
+            // resilient link on only from the next one
+            if (liveOpen && !isResilientSessionActive) {
+                return "Copy of the live starts with the next live: this one was opened without it"
+            }
+            return null
+        }
+
+        override fun attachLiveTap(tap: io.github.thibaultbee.streampack.core.elements.endpoints.composites.sinks.ITsPacketTap?) {
+            resilientSrtEndpoint.tsTap = tap
+            // A key frame now, so the recording's first segment starts without waiting a GOP
+            if (tap != null) resilientSrtEndpoint.keyFrameRequester?.invoke()
+        }
     }
 
     /**

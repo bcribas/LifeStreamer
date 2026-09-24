@@ -162,6 +162,14 @@ class DataStoreRepository(
         )
     }.distinctUntilChanged()
 
+    /** The endpoint type alone, without building a descriptor (which, for files, inserts one). */
+    val endpointTypeFlow: Flow<EndpointType> = dataStore.data.map { preferences ->
+        EndpointType.fromId(
+            preferences[stringPreferencesKey(context.getString(R.string.endpoint_type_key))]?.toInt()
+                ?: EndpointType.SRT.id
+        )
+    }.distinctUntilChanged()
+
     val endpointDescriptorFlow: Flow<MediaDescriptor> = dataStore.data.map { preferences ->
         val endpointTypeId =
             preferences[stringPreferencesKey(context.getString(R.string.endpoint_type_key))]?.toInt()

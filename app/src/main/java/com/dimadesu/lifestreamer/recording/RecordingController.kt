@@ -16,6 +16,7 @@ import io.github.thibaultbee.streampack.core.configuration.mediadescriptor.creat
 import io.github.thibaultbee.streampack.core.elements.endpoints.IEndpointInternal
 import io.github.thibaultbee.streampack.core.elements.endpoints.composites.CompositeEndpoint
 import io.github.thibaultbee.streampack.core.elements.endpoints.composites.muxers.ts.TsMuxer
+import io.github.thibaultbee.streampack.core.elements.endpoints.composites.sinks.ITsPacketTap
 import io.github.thibaultbee.streampack.core.elements.endpoints.composites.sinks.TsTapSink
 import io.github.thibaultbee.streampack.core.pipelines.IDispatcherProvider
 import io.github.thibaultbee.streampack.core.pipelines.outputs.encoding.IConfigurableAudioVideoEncodingPipelineOutput
@@ -58,7 +59,25 @@ class RecordingController(
     private val scope: CoroutineScope,
     private val repository: DataStoreRepository,
     private val streamerProvider: () -> ISingleStreamer?,
+    private val liveCopyHost: LiveCopyHost? = null,
 ) {
+    /**
+     * What the copy-of-the-live mode needs from the live: a TS stream it can tap, which only the
+     * resilient SRT endpoint offers.
+     */
+    interface LiveCopyHost {
+        /**
+         * Why the live cannot be copied now, or null.
+         *
+         * @param liveOpen whether the live is already open: its endpoint is then fixed until the
+         * next live
+         */
+        suspend fun liveCopyBlockedReason(liveOpen: Boolean): String?
+
+        /** Feeds the live's TS to [tap], or stops feeding it with null. */
+        fun attachLiveTap(tap: ITsPacketTap?)
+    }
+
     enum class State { OFF, ARMED, RECORDING, ERROR }
 
     data class Status(
@@ -154,7 +173,9 @@ class RecordingController(
         when {
             !store.hasPermission() -> RecordingFailure.AccessLost.reason
             (store.freeBytes() ?: 0L) < MIN_FREE_BYTES -> RecordingFailure.StorageFull.reason
-            config.mode == RecordingMode.LIVE_COPY -> "Copy of the live is not available yet: choose Separate quality"
+            config.mode == RecordingMode.LIVE_COPY -> liveCopyHost
+                ?.liveCopyBlockedReason(streamerProvider()?.isOpenFlow?.value == true)
+                ?: if (liveCopyHost == null) "Copy of the live is not available" else null
             else -> null
         }
     }
@@ -173,6 +194,10 @@ class RecordingController(
         updateStatus { it.copy(mode = config.mode, error = null, warning = null) }
         blockedReason()?.let { reason ->
             updateStatus { it.copy(state = State.ERROR, error = reason) }
+            return
+        }
+        if (config.mode == RecordingMode.LIVE_COPY) {
+            startLiveCopyLocked(config)
             return
         }
         val streamer = streamerProvider()
@@ -206,8 +231,7 @@ class RecordingController(
             }
         }
 
-        val sessionName = "LifeStreamer_" +
-                SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
+        val sessionName = sessionName()
         val newWriter = SegmentedTsWriter(
             SafSegmentStore(context, Uri.parse(config.folderUri)),
             sessionName,
@@ -256,6 +280,38 @@ class RecordingController(
         }
     }
 
+    /**
+     * The live's own TS, byte for byte: no encoder of its own, the live's resolution and bitrate,
+     * and no gap on a network drop since the resilient endpoint keeps muxing through it.
+     */
+    private suspend fun startLiveCopyLocked(config: DataStoreRepository.RecordingConfig) {
+        val host = liveCopyHost ?: return
+        val live = (streamerProvider() as? IVideoSingleStreamer)?.videoConfigFlow?.value
+        val newWriter = SegmentedTsWriter(
+            SafSegmentStore(context, Uri.parse(config.folderUri)),
+            sessionName(),
+            config.segmentDurationMs,
+            writerListener,
+            minFreeBytes = MIN_FREE_BYTES,
+        )
+        newWriter.start()
+        host.attachLiveTap(newWriter)
+        writer = newWriter
+        output = null
+        wakeLock.acquire(WAKE_LOCK_TIMEOUT_MS)
+        registerEjectReceiver(config.folderUri)
+        Log.i(TAG, "Recording a copy of the live")
+        updateStatus {
+            it.copy(
+                state = State.RECORDING,
+                startedAtMs = System.currentTimeMillis(),
+                resolution = live?.resolution?.toString(),
+                warning = null,
+                error = null,
+            )
+        }
+    }
+
     private suspend fun stopLocked(error: String?) {
         val currentWriter = writer ?: run {
             if (error != null) updateStatus { it.copy(state = State.ERROR, error = error) }
@@ -269,8 +325,10 @@ class RecordingController(
         outputWatch = null
         unregisterEjectReceiver()
 
-        // The output first, so its last frames still go through the muxer into the writer
+        // The output first, so its last frames still go through the muxer into the writer. A
+        // copy of the live has no output: the tap is just detached.
         currentOutput?.let { runCatching { it.stopStream() } }
+        if (currentOutput == null) liveCopyHost?.attachLiveTap(null)
         val clean = withContext(Dispatchers.IO) { currentWriter.stop() }
         if (!clean) Log.w(TAG, "The last segment may be incomplete: storage did not finish in time")
         val secondary = streamerProvider() as? ISecondaryOutputStreamer
@@ -384,6 +442,9 @@ class RecordingController(
             if (_statusFlow.compareAndSet(current, transform(current))) return
         }
     }
+
+    private fun sessionName() =
+        "LifeStreamer_" + SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US).format(Date())
 
     private fun sameShape(a: Size, b: Size): Boolean =
         kotlin.math.abs(a.width.toDouble() / a.height - b.width.toDouble() / b.height) < 0.02
