@@ -67,7 +67,13 @@ interface ExternalPipSourceProvider {
  * The result of building the second layer. [isPlaceholder] is true when the requested source could
  * not be built and the test image stands in for it; [note] says why, for the operator.
  */
-data class PipBuild(val spec: LayerSpec, val isPlaceholder: Boolean, val note: String? = null)
+data class PipBuild(
+    val spec: LayerSpec,
+    val isPlaceholder: Boolean,
+    val note: String? = null,
+    /** The player an RTMP layer shows: nothing else releases it. */
+    val player: androidx.media3.exoplayer.ExoPlayer? = null
+)
 
 /**
  * Builds the layer specs the composition is made of.
@@ -112,8 +118,9 @@ class CompositionSources(
         captureResolution = if (pairedWithCamera) capabilities.report().concurrentCameraMaxSize else null
     )
 
-    fun placeholderSpec() = LayerSpec(
-        layer = pipLayer(),
+    /** The test image in [layer]: the second layer by default, keeping its place when given. */
+    fun placeholderSpec(layer: VideoLayer = pipLayer()) = LayerSpec(
+        layer = layer,
         childFactory = BitmapSourceFactory(testBitmap)
     )
 
@@ -124,21 +131,23 @@ class CompositionSources(
     suspend fun pipSpec(
         kind: PipSourceKind,
         primaryCameraId: String,
-        external: ExternalPipSourceProvider?
+        external: ExternalPipSourceProvider?,
+        /** The layer as it is now, so a new source keeps its place, size and style. */
+        layer: VideoLayer = pipLayer()
     ): PipBuild = when (kind) {
-        PipSourceKind.TEST_IMAGE -> PipBuild(placeholderSpec(), isPlaceholder = true)
+        PipSourceKind.TEST_IMAGE -> PipBuild(placeholderSpec(layer), isPlaceholder = true)
 
         PipSourceKind.CAMERA -> {
             val secondId = capabilities.secondCameraFor(primaryCameraId)
             if (secondId == null) {
                 PipBuild(
-                    placeholderSpec(), isPlaceholder = true,
+                    placeholderSpec(layer), isPlaceholder = true,
                     note = capabilities.reasonSecondCameraUnavailable(primaryCameraId)
                 )
             } else {
                 PipBuild(
                     LayerSpec(
-                        layer = pipLayer(),
+                        layer = layer,
                         childFactory = CameraSourceFactory(secondId),
                         // Both cameras of a concurrent pair have to stay inside the guaranteed
                         // configuration, so the capture size is capped rather than inherited.
@@ -154,23 +163,24 @@ class CompositionSources(
             require(url.isNotBlank()) { "RTMP source 1 has no URL" }
             val player = RtmpSourceSwitchHelper.createExoPlayer(application, url, bufferMs)
             PipBuild(
-                LayerSpec(layer = pipLayer(), childFactory = RTMPVideoSource.Factory(player)),
-                isPlaceholder = false
+                LayerSpec(layer = layer, childFactory = RTMPVideoSource.Factory(player)),
+                isPlaceholder = false,
+                player = player
             )
         } catch (e: Exception) {
             Log.w(TAG, "Could not build the RTMP layer: ${e.message}")
-            PipBuild(placeholderSpec(), isPlaceholder = true, note = "RTMP source unavailable - showing placeholder")
+            PipBuild(placeholderSpec(layer), isPlaceholder = true, note = "RTMP source unavailable - showing placeholder")
         }
 
         PipSourceKind.SCREEN, PipSourceKind.USB -> {
             val factory = external?.factoryFor(kind)
             if (factory == null) {
                 PipBuild(
-                    placeholderSpec(), isPlaceholder = true,
+                    placeholderSpec(layer), isPlaceholder = true,
                     note = external?.reasonUnavailable(kind) ?: OPEN_APP_REASON
                 )
             } else {
-                PipBuild(LayerSpec(layer = pipLayer(), childFactory = factory), isPlaceholder = false)
+                PipBuild(LayerSpec(layer = layer, childFactory = factory), isPlaceholder = false)
             }
         }
     }

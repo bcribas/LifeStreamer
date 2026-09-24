@@ -30,6 +30,9 @@ class RTMPVideoSource (
     private val exoPlayer: ExoPlayer,
     private val dispatcherProvider: io.github.thibaultbee.streampack.core.pipelines.IVideoDispatcherProvider
 ) : AbstractPreviewableSource(), IVideoSourceInternal {
+    /** The player it shows. The source never releases it: whoever made it does. */
+    val player: ExoPlayer get() = exoPlayer
+
     companion object {
         private const val TAG = "RTMPVideoSource"
     }
@@ -737,8 +740,12 @@ class RTMPVideoSource (
             return customSrc
         }
 
+        /**
+         * The same source only when it shows this same player. "Any RTMP source" made a switch
+         * from one feed to another keep the first one, silently.
+         */
         override fun isSourceEquals(source: IVideoSourceInternal?): Boolean {
-            return source is RTMPVideoSource
+            return source is RTMPVideoSource && source.player === exoPlayer
         }
     }
 }

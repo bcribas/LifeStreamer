@@ -571,7 +571,7 @@ class PreviewFragment : Fragment(R.layout.main_fragment) {
 
                             lifecycleScope.launch {
                                 try {
-                                    (previewViewModel.streamer as? IWithVideoSource)?.setCameraId(camera.id)
+                                    previewViewModel.selectCamera(camera.id)
                                     Log.i(TAG, "Switched to camera: ${camera.displayName}")
                                     refreshCameraButtonHighlight()
                                 } catch (e: Exception) {

@@ -135,6 +135,27 @@ class CompositionController(
     var isPipOnPlaceholder: Boolean = true
         private set
 
+    /**
+     * The player of an RTMP second layer. A source never releases its player, so it is released
+     * here when the layer takes another source or the composition goes away; before, every switch
+     * left one decoding in the background.
+     */
+    private var pipPlayer: androidx.media3.exoplayer.ExoPlayer? = null
+
+    private fun keepPipPlayer(player: androidx.media3.exoplayer.ExoPlayer?) {
+        val previous = pipPlayer
+        pipPlayer = player
+        if (previous != null && previous !== player) {
+            android.os.Handler(Looper.getMainLooper()).post {
+                runCatching {
+                    previous.stop()
+                    previous.release()
+                }.onFailure { Log.w(TAG, "Could not release an RTMP layer player: ${it.message}") }
+                Log.i(TAG, "Released the second layer's RTMP player")
+            }
+        }
+    }
+
     /** Registered by the ViewModel while it is alive; builds the sources only the app can build. */
     @Volatile
     var externalPipProvider: ExternalPipSourceProvider? = null
@@ -381,6 +402,7 @@ class CompositionController(
             )
         )
         isPipOnPlaceholder = pip.isPlaceholder
+        keepPipPlayer(pip.player)
         composite?.let { onCompositionAppeared(it) }
         restoreSaved()
         sourcesChanged()
@@ -396,6 +418,7 @@ class CompositionController(
             ?: primaryCameraId()
         stopObservingFailures()
         switcher(CameraSourceFactory(cameraId))
+        keepPipPlayer(null)
         sourcesChanged()
         Log.i(TAG, "Composition off, back to camera $cameraId")
     }
@@ -407,8 +430,10 @@ class CompositionController(
         _pipSource.value = kind
         scheduleSave()
         val target = composite ?: return@structural
-        val pip = sources.pipSpec(kind, primaryCameraId(), externalPipProvider)
+        // The layer as it is now: a new source keeps where it was put, its size and its style
+        val pip = sources.pipSpec(kind, primaryCameraId(), externalPipProvider, currentPipLayer(target))
         target.replaceLayerSource(CompositionLayers.PIP, pip.spec)
+        keepPipPlayer(pip.player)
         isPipOnPlaceholder = pip.isPlaceholder
         pip.note?.let { _messages.tryEmit(it) }
         sourcesChanged()
@@ -422,7 +447,8 @@ class CompositionController(
      */
     suspend fun replacePipSource(factory: IVideoSourceInternal.Factory): Result<Unit> = structural {
         val target = composite ?: return@structural
-        target.replaceLayerSource(CompositionLayers.PIP, LayerSpec(sources.pipLayer(), factory))
+        target.replaceLayerSource(CompositionLayers.PIP, LayerSpec(currentPipLayer(target), factory))
+        keepPipPlayer(null)
         isPipOnPlaceholder = false
         sourcesChanged()
         _layersInvalidated.tryEmit(Unit)
@@ -432,13 +458,18 @@ class CompositionController(
     suspend fun degradePipToPlaceholder(reason: String): Result<Unit> = structural {
         val target = composite ?: return@structural
         if (isPipOnPlaceholder) return@structural
-        target.replaceLayerSource(CompositionLayers.PIP, sources.placeholderSpec())
+        target.replaceLayerSource(CompositionLayers.PIP, sources.placeholderSpec(currentPipLayer(target)))
+        keepPipPlayer(null)
         isPipOnPlaceholder = true
         _messages.tryEmit(reason)
         sourcesChanged()
         _layersInvalidated.tryEmit(Unit)
         Log.i(TAG, "Second layer degraded to the placeholder: $reason")
     }
+
+    /** The second layer where it is now, or where a new one goes. */
+    private fun currentPipLayer(target: ICompositeVideoSource) =
+        target.layoutFlow.value[CompositionLayers.PIP] ?: sources.pipLayer()
 
     /** One row per kind, with why it cannot be used right now, for the page and the app's picker. */
     data class PipSourceOption(val kind: PipSourceKind, val available: Boolean, val reason: String?)

@@ -73,6 +73,7 @@ import io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.CameraSourceFactory
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.extensions.isFpsSupported
 import io.github.thibaultbee.streampack.core.interfaces.IWithVideoSource
+import io.github.thibaultbee.streampack.core.interfaces.setCameraId
 import com.dimadesu.lifestreamer.rtmp.audio.MediaProjectionAudioSourceFactory
 import io.github.thibaultbee.streampack.core.streamers.single.ISecondaryOutputStreamer
 import io.github.thibaultbee.streampack.core.streamers.single.SingleStreamer
@@ -3680,6 +3681,9 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                         }
                     }
                     rtmpDisconnectListener = null
+                    // Released once the camera has replaced it: the source never releases its
+                    // player, and this one was simply dropped, still decoding the feed
+                    val leftPlayer = currentRtmpPlayer
                     currentRtmpPlayer = null
 
                     // Don't release streaming MediaProjection here - it's managed by stream lifecycle.
@@ -3703,6 +3707,13 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                     } else {
                         currentStreamer.setVideoSource(CameraSourceFactory(application))
                         Log.i(TAG, "Switched to camera video (default camera) with BT-aware audio")
+                    }
+                    leftPlayer?.let { player ->
+                        runCatching {
+                            player.stop()
+                            player.release()
+                            Log.i(TAG, "Released the RTMP player left behind")
+                        }.onFailure { Log.w(TAG, "Error releasing the RTMP player: ${it.message}") }
                     }
                     setAudioSourceBasedOnVideoSource()
 
@@ -4853,6 +4864,20 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
      * With a composition running that silently destroyed it, which is not what anyone means by
      * "use this camera" when two are already on screen.
      */
+    /**
+     * Switches the single source to camera [id], serialized with the other switches and
+     * remembered as the camera to come back to (the buttons used to set it on StreamPack directly,
+     * which forgot it).
+     */
+    suspend fun selectCamera(id: String) {
+        videoSourceMutex.withLock {
+            val current = serviceStreamer ?: return
+            (current as? IWithVideoSource)?.setCameraId(id)
+            lastUsedCameraId = id
+            compositionController?.primaryCameraHint = id
+        }
+    }
+
     fun setCompositionLayerCamera(cameraId: String) {
         val controller = compositionController ?: return
         val layout = activeComposite()?.layoutFlow?.value ?: return
