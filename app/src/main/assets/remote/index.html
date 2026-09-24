@@ -103,8 +103,45 @@
                       background: #2a2a2a; padding: 2px; }
   input[type=range] { accent-color: var(--accent); }
 
-  @media (orientation: landscape) and (min-width: 700px) {
-    #main { display: grid; grid-template-columns: 1fr 340px; gap: 12px; align-items: start; }
+  /* The live and recording bars and the tabs stay on top while a tab scrolls under them. */
+  #top { position: sticky; top: 0; z-index: 5; background: var(--bg); padding-top: 2px; }
+  #top .panel { padding: 8px 10px; }
+  .tabs { display: flex; gap: 4px; margin: 0 0 8px; }
+  .tabs button { flex: 1; min-height: 40px; padding: 6px 4px; }
+  .tab[hidden] { display: none; }
+  .cols { display: block; }
+  @media (min-width: 900px) {
+    .cols { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 12px; align-items: start; }
+    #main { max-width: 1200px; margin: 0 auto; }
+  }
+
+  /* Settings forms */
+  input, select, textarea { user-select: text; -webkit-user-select: text; }
+  .set-groups { margin-bottom: 8px; }
+  .field { display: grid; grid-template-columns: minmax(0, 1fr) minmax(150px, 52%); gap: 4px 10px;
+           align-items: center; padding: 9px 0; border-bottom: 1px solid var(--line); }
+  .field:last-child { border-bottom: 0; }
+  .field > label { font-size: 13px; }
+  .field .sub { grid-column: 1 / -1; font-size: 11px; color: var(--dim); }
+  .field .err { grid-column: 1 / -1; font-size: 12px; color: var(--bad); }
+  .field.dirty > label::after { content: " \2022"; color: var(--warn); }
+  .field input[type=text], .field input[type=number], .field input[type=password], .field select {
+    width: 100%; min-height: 40px; padding: 8px; font-size: 14px; color: var(--text);
+    background: #2a2a2a; border: 1px solid var(--line); border-radius: 6px; }
+  .field input:disabled, .field select:disabled { opacity: .45; }
+  .field .ctl { display: flex; gap: 6px; align-items: center; min-width: 0; }
+  .field .ctl > input, .field .ctl > select { flex: 1; min-width: 0; }
+  .field .unit { color: var(--dim); font-size: 12px; white-space: nowrap; }
+  .field button.toggle { min-height: 36px; width: 100%; }
+  .badge { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 8px;
+           background: #333; color: var(--dim); margin-left: 6px; vertical-align: 1px; }
+  .badge.wait { background: #4a3a00; color: var(--warn); }
+  .set-actions { justify-content: flex-end; margin-top: 8px; }
+  #setWarnings { color: var(--warn); font-size: 12px; margin-top: 6px; }
+  @media (min-width: 900px) {
+    /* Two columns of fields: a control a whole screen wide is hard to read */
+    #setForm, #powerForm { display: grid; grid-template-columns: 1fr 1fr; column-gap: 28px; }
+    #setForm .field:nth-last-child(2):nth-child(odd), #powerForm .field:nth-last-child(2):nth-child(odd) { border-bottom: 0; }
   }
 </style>
 </head>
@@ -131,7 +168,7 @@
 </div>
 
 <div id="main" hidden>
-  <div>
+  <div id="top">
     <div id="live" class="panel">
       <div class="info">
         <div id="liveStatus"><span class="dot st-idle"></span><span>Not streaming</span></div>
@@ -148,36 +185,71 @@
       </div>
       <button id="recBtn">Turn on</button>
     </div>
-    <div id="thermal" class="panel" hidden></div>
-    <div id="stage"><div class="grid"></div></div>
-    <h2>Layout</h2>
-    <div class="row" id="presets"></div>
-    <div class="row" style="margin-top:6px">
-      <button id="swap">⇄ Swap</button>
-      <button id="mute">Mute</button>
-    </div>
+    <nav class="tabs" id="tabs">
+      <button data-tab="live">Live</button>
+      <button data-tab="cameras">Cameras</button>
+      <button data-tab="settings">Settings</button>
+      <button data-tab="power">Power</button>
+    </nav>
   </div>
 
-  <div>
-    <h2>Composition</h2>
-    <div class="panel" id="compBox">
-      <div class="row" style="align-items:center;justify-content:space-between">
-        <div id="compLabel" class="muted"></div>
-        <button id="compToggle">Turn on</button>
+  <section class="tab" id="tab-live">
+    <div class="cols">
+      <div>
+        <div id="thermal" class="panel" hidden></div>
+        <div id="stage"><div class="grid"></div></div>
+        <h2>Layout</h2>
+        <div class="row" id="presets"></div>
+        <div class="row" style="margin-top:6px">
+          <button id="swap">⇄ Swap</button>
+          <button id="mute">Mute</button>
+        </div>
       </div>
-      <div id="compDetails">
-        <div class="muted" style="margin-top:8px">Second layer</div>
-        <div class="row seg" id="pipSources" style="margin-top:4px"></div>
-        <div class="muted" id="pipReason" style="margin-top:4px"></div>
-        <div class="muted" style="margin-top:8px">Background</div>
-        <div class="row" id="bgRow" style="margin-top:4px;align-items:center"></div>
+      <div>
+        <h2>Zoom</h2>
+        <div class="panel" id="zoomBox"><div class="muted">Select a camera layer</div></div>
       </div>
     </div>
-    <h2>Layers</h2>
-    <div id="layers"></div>
-    <h2>Zoom</h2>
-    <div class="panel" id="zoomBox"><div class="muted">Select a camera layer</div></div>
-    <h2>Power</h2>
+  </section>
+
+  <section class="tab" id="tab-cameras" hidden>
+    <div class="cols">
+      <div>
+        <h2>Composition</h2>
+        <div class="panel" id="compBox">
+          <div class="row" style="align-items:center;justify-content:space-between">
+            <div id="compLabel" class="muted"></div>
+            <button id="compToggle">Turn on</button>
+          </div>
+          <div id="compDetails">
+            <div class="muted" style="margin-top:8px">Second layer</div>
+            <div class="row seg" id="pipSources" style="margin-top:4px"></div>
+            <div class="muted" id="pipReason" style="margin-top:4px"></div>
+            <div class="muted" style="margin-top:8px">Background</div>
+            <div class="row" id="bgRow" style="margin-top:4px;align-items:center"></div>
+          </div>
+        </div>
+      </div>
+      <div>
+        <h2>Layers</h2>
+        <div id="layers"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="tab" id="tab-settings" hidden>
+    <div class="row seg set-groups" id="setGroups"></div>
+    <div class="muted" id="setNote" style="margin-bottom:6px"></div>
+    <div class="panel" id="setForm"><div class="muted">Loading…</div></div>
+    <div id="setWarnings"></div>
+    <div class="row set-actions">
+      <button id="setDiscard">Discard changes</button>
+      <button id="setSave" class="on">Save</button>
+    </div>
+  </section>
+
+  <section class="tab" id="tab-power" hidden>
+    <h2>Preview right now</h2>
     <div class="row">
       <button data-preview="off">Preview off</button>
       <button data-preview="on">Preview on</button>
@@ -195,7 +267,12 @@
     <div class="muted" style="margin-top:6px" id="powerNote">
       None of these change what you stream.
     </div>
-  </div>
+    <h2>Power and screen settings</h2>
+    <div class="panel" id="powerForm"><div class="muted">Loading…</div></div>
+    <div class="row set-actions">
+      <button id="powerSave" class="on">Save</button>
+    </div>
+  </section>
 </div>
 
 <script>
@@ -252,6 +329,8 @@ function api(path, body, method) {
 
 function signOut() {
   token = "";
+  settings = null;
+  dirty = {};
   sessionStorage.removeItem("lsToken");
   if (events) { events.close(); events = null; }
   document.getElementById("gate").hidden = false;
@@ -282,6 +361,7 @@ function connect() {
   events.addEventListener("message", function (e) {
     showStatus(JSON.parse(e.data).text, "#444");
   });
+  events.addEventListener("settings", function () { settingsChanged(); });
   events.onerror = function () { showStatus("Reconnecting…", "#7a5"); };
 }
 
@@ -308,6 +388,7 @@ function enter(pin) {
     document.getElementById("main").hidden = false;
     connect();
     api("/api/state", undefined, "GET").then(render);
+    showTab(currentTab());
   }).catch(function () { err.textContent = "Could not reach the phone"; });
 }
 
@@ -329,8 +410,12 @@ function render(s) {
     stage.style.aspectRatio = s.canvasWidth + "/" + s.canvasHeight;
   }
 
+  var wasLive = lastLiveKey;
+  lastLiveKey = s.stream ? s.stream.status + "/" + (s.recording && s.recording.state) : "";
   renderLive(s.stream);
   renderRecording(s.recording);
+  // Starting or stopping changes what can be edited and what waits: fetch them again
+  if (wasLive !== null && wasLive !== lastLiveKey) settingsChanged();
   renderComposition(s);
   renderThermal(s.thermal);
   renderPresets(s.presets, s.activePresetId);
@@ -1065,10 +1150,299 @@ document.querySelectorAll("[data-fps]").forEach(function (b) {
   b.onclick = function () { api("/api/preview/fps", { maxFps: parseInt(b.dataset.fps, 10) }); };
 });
 
+// ---- tabs ----
+
+var lastLiveKey = null;
+
+function showTab(name) {
+  var names = ["live", "cameras", "settings", "power"];
+  if (names.indexOf(name) < 0) name = "live";
+  names.forEach(function (n) {
+    document.getElementById("tab-" + n).hidden = n !== name;
+  });
+  Array.prototype.forEach.call(document.querySelectorAll("#tabs button"), function (b) {
+    b.className = b.dataset.tab === name ? "on" : "";
+  });
+  // Remembered per browser; storage may be unavailable (private mode), which only loses that.
+  try { localStorage.setItem("lsTab", name); } catch (e) {}
+  // Only once signed in: before that the request would be refused and sign the page out
+  if ((name === "settings" || name === "power") && !settings && token) loadSettings();
+}
+
+Array.prototype.forEach.call(document.querySelectorAll("#tabs button"), function (b) {
+  b.onclick = function () { showTab(b.dataset.tab); };
+});
+
+// ---- settings ----
+
+var settings = null;       // the last GET /api/settings
+var settingsGroup = "video";
+var dirty = {};            // key -> edited value, not saved yet
+var fieldErrors = {};      // key -> why the phone refused it
+var settingsStale = false; // changed elsewhere while this page had unsaved edits
+
+// When a group's changes take effect, said once for the group; a field that differs says so itself.
+var GROUP_APPLIES = { video: "when_idle", audio: "when_idle", destination: "next_live",
+                      recording: "next_recording", power: "now" };
+var GROUP_APPLIES_TEXT = {
+  when_idle: "Changes apply at once when nothing is streaming, otherwise when the live stops.",
+  next_live: "Changes apply at the next live, and are locked while one is on.",
+  next_recording: "Changes apply to the next recording.",
+  now: "Changes apply at once."
+};
+var FIELD_APPLIES_TEXT = {
+  now: "applies at once",
+  when_idle: "applies when nothing is streaming",
+  next_live: "applies at the next live",
+  next_recording: "applies to the next recording"
+};
+
+function hasDirty() { return Object.keys(dirty).length > 0; }
+
+function loadSettings() {
+  return api("/api/settings", undefined, "GET").then(function (s) {
+    if (!s || !s.groups) return;
+    settings = s;
+    settingsStale = false;
+    renderSettings();
+  }).catch(function () {});
+}
+
+/** Something changed on the phone or on another page. */
+function settingsChanged() {
+  if (!settings) return;
+  // Never pull the form from under an edit in progress
+  var editing = document.activeElement && document.activeElement.closest &&
+    document.activeElement.closest("#setForm, #powerForm");
+  if (hasDirty() || editing) { settingsStale = true; return; }
+  loadSettings();
+}
+
+function groupById(id) {
+  return settings && settings.groups.filter(function (g) { return g.id === id; })[0];
+}
+
+function renderSettings() {
+  if (!settings) return;
+  var bar = document.getElementById("setGroups");
+  bar.innerHTML = "";
+  settings.groups.forEach(function (g) {
+    if (g.id === "power") return;  // it has its own tab
+    var b = document.createElement("button");
+    b.textContent = g.title;
+    b.className = g.id === settingsGroup ? "on" : "";
+    b.onclick = function () { settingsGroup = g.id; renderSettings(); };
+    bar.appendChild(b);
+  });
+  var group = groupById(settingsGroup) || settings.groups[0];
+  var notes = [];
+  if (settings.live && group.id === "destination") notes.push("A live is on: the destination is locked until it stops.");
+  else if (settings.live && (group.id === "video" || group.id === "audio")) notes.push("A live is on: changes here are saved and apply when it stops.");
+  else if (GROUP_APPLIES_TEXT[GROUP_APPLIES[group.id]]) notes.push(GROUP_APPLIES_TEXT[GROUP_APPLIES[group.id]]);
+  if (group.note) notes.push(group.note);
+  if (group.id === "recording" && settings.recordingFolder) notes.push("Folder: " + settings.recordingFolder);
+  document.getElementById("setNote").textContent = notes.join(" ");
+  renderFields(document.getElementById("setForm"), group);
+  renderFields(document.getElementById("powerForm"), groupById("power"));
+  document.getElementById("setDiscard").disabled = !hasDirty();
+}
+
+function currentValue(field) {
+  return Object.prototype.hasOwnProperty.call(dirty, field.key) ? dirty[field.key] : field.value;
+}
+
+function setDirty(field, value) {
+  var original = field.value;
+  if (!field.secret && String(value) === String(original)) delete dirty[field.key];
+  else if (field.secret && value === "") delete dirty[field.key];
+  else dirty[field.key] = value;
+  delete fieldErrors[field.key];
+  document.getElementById("setDiscard").disabled = !hasDirty();
+}
+
+function renderFields(box, group) {
+  box.innerHTML = "";
+  if (!group) return;
+  if (!group.fields.length) {
+    var none = document.createElement("div");
+    none.className = "muted";
+    none.textContent = "Nothing to set here with this destination.";
+    box.appendChild(none);
+    return;
+  }
+  group.fields.forEach(function (field) { box.appendChild(buildField(field)); });
+}
+
+function buildField(field) {
+  var row = document.createElement("div");
+  row.className = "field" + (Object.prototype.hasOwnProperty.call(dirty, field.key) ? " dirty" : "");
+  var label = document.createElement("label");
+  label.textContent = field.label;
+  if (field.pending) {
+    var badge = document.createElement("span");
+    badge.className = "badge wait";
+    badge.textContent = "waiting";
+    badge.title = "Saved; applies when the live stops";
+    label.appendChild(badge);
+  }
+  row.appendChild(label);
+
+  var locked = field.applies === "next_live" && settings.live;
+  var ctl = document.createElement("div");
+  ctl.className = "ctl";
+  var value = currentValue(field);
+  var input;
+
+  function markRow() { row.className = "field" + (Object.prototype.hasOwnProperty.call(dirty, field.key) ? " dirty" : ""); }
+
+  if (field.type === "bool") {
+    input = document.createElement("button");
+    input.className = "toggle" + (value ? " on" : "");
+    input.textContent = value ? "On" : "Off";
+    input.onclick = function () {
+      var next = !(currentValue(field) === true);
+      setDirty(field, next);
+      input.className = "toggle" + (next ? " on" : "");
+      input.textContent = next ? "On" : "Off";
+      markRow();
+    };
+  } else if (field.options) {
+    input = document.createElement("select");
+    var known = false;
+    field.options.forEach(function (o) {
+      var opt = document.createElement("option");
+      opt.value = o.value;
+      opt.textContent = o.label;
+      if (String(o.value) === String(value)) { opt.selected = true; known = true; }
+      input.appendChild(opt);
+    });
+    if (!known && value !== null && value !== undefined) {
+      var cur = document.createElement("option");
+      cur.value = String(value);
+      cur.textContent = String(value) + " (not available)";
+      cur.selected = true;
+      input.insertBefore(cur, input.firstChild);
+    }
+    input.onchange = function () { setDirty(field, input.value); markRow(); };
+  } else if (field.secret) {
+    input = document.createElement("input");
+    input.type = "password";
+    input.autocomplete = "new-password";
+    input.placeholder = field.isSet ? "saved (" + field.hint + ")" : "not set";
+    input.value = Object.prototype.hasOwnProperty.call(dirty, field.key) && dirty[field.key] ? dirty[field.key] : "";
+    input.oninput = function () { setDirty(field, input.value); markRow(); };
+  } else {
+    input = document.createElement("input");
+    var numeric = field.type === "int" || field.format === "port" || field.format === "latency_ms" || field.format === "mtu";
+    input.type = numeric ? "number" : "text";
+    if (numeric) input.inputMode = "numeric";
+    if (field.min !== undefined && field.min !== null) input.min = field.min;
+    if (field.max !== undefined && field.max !== null) input.max = field.max;
+    if (field.type === "int") input.step = (value !== null && value < 1000) ? 50 : 500;
+    input.value = value === null || value === undefined ? "" : value;
+    input.oninput = function () {
+      var v = input.value;
+      setDirty(field, field.type === "int" ? (v === "" ? "" : Number(v)) : v);
+      markRow();
+    };
+  }
+  input.disabled = locked;
+  if (locked) input.title = "Stop the live to change this";
+  ctl.appendChild(input);
+  if (field.secret && field.isSet) {
+    var clear = document.createElement("button");
+    clear.textContent = "Clear";
+    clear.disabled = locked;
+    clear.onclick = function () {
+      dirty[field.key] = null;
+      input.value = "";
+      input.placeholder = "will be cleared";
+      markRow();
+      document.getElementById("setDiscard").disabled = false;
+    };
+    ctl.appendChild(clear);
+  }
+  if (field.unit) {
+    var unit = document.createElement("span");
+    unit.className = "unit";
+    unit.textContent = field.unit;
+    ctl.appendChild(unit);
+  }
+  row.appendChild(ctl);
+
+  var groupApplies = GROUP_APPLIES[field.key && groupOf(field.key)];
+  var appliesText = field.applies !== groupApplies ? FIELD_APPLIES_TEXT[field.applies] : "";
+  var keepText = field.secret && field.isSet ? "leave empty to keep it" : "";
+  var subText = [field.help, keepText, appliesText].filter(function (t) { return t; }).join(" · ");
+  if (field.min !== undefined && field.min !== null && field.type === "int") {
+    subText = (subText ? subText + " · " : "") + field.min + "–" + field.max + " " + (field.unit || "");
+  }
+  if (subText) {
+    var sub = document.createElement("div");
+    sub.className = "sub";
+    sub.textContent = subText;
+    row.appendChild(sub);
+  }
+  if (fieldErrors[field.key]) {
+    var err = document.createElement("div");
+    err.className = "err";
+    err.textContent = fieldErrors[field.key];
+    row.appendChild(err);
+  }
+  return row;
+}
+
+function saveSettings(keys) {
+  var changes = {};
+  keys.forEach(function (k) { if (Object.prototype.hasOwnProperty.call(dirty, k)) changes[k] = dirty[k]; });
+  if (!Object.keys(changes).length) { showStatus("Nothing to save", "#444"); return; }
+  api("/api/settings", { changes: changes }).then(function (res) {
+    if (!res) return;
+    (res.applied || []).concat(res.pending || []).forEach(function (k) { delete dirty[k]; });
+    fieldErrors = res.rejected || {};
+    var parts = [];
+    if (res.applied && res.applied.length) parts.push(res.applied.length + " applied");
+    if (res.pending && res.pending.length) parts.push(res.pending.length + " saved, waiting");
+    var refused = Object.keys(fieldErrors).length;
+    if (refused) parts.push(refused + " refused");
+    showStatus(parts.join(" · ") || "Saved", refused ? "#7a3a3a" : "#2e5e2e");
+    document.getElementById("setWarnings").textContent = (res.warnings || []).join(" · ");
+    loadSettings();
+  }).catch(function () {});
+}
+
+function groupOf(key) {
+  var found = settings && settings.groups.filter(function (g) {
+    return g.fields.some(function (f) { return f.key === key; });
+  })[0];
+  return found ? found.id : null;
+}
+
+function keysOfGroup(id) {
+  var g = groupById(id);
+  return g ? g.fields.map(function (f) { return f.key; }) : [];
+}
+
+document.getElementById("setSave").onclick = function () { saveSettings(Object.keys(dirty).filter(function (k) {
+  return keysOfGroup("power").indexOf(k) < 0;
+})); };
+document.getElementById("powerSave").onclick = function () { saveSettings(keysOfGroup("power")); };
+document.getElementById("setDiscard").onclick = function () {
+  dirty = {};
+  fieldErrors = {};
+  document.getElementById("setWarnings").textContent = "";
+  if (settingsStale) loadSettings(); else renderSettings();
+};
+
 // ---- start ----
 
 // The PIN arrives in the fragment, which browsers never send to the server, so it stays out of
 // access logs. Clear it from the bar once used.
+function currentTab() {
+  try { return localStorage.getItem("lsTab") || "live"; } catch (e) { return "live"; }
+}
+showTab(currentTab());
+
 var hashPin = (location.hash || "").replace("#", "").trim();
 if (hashPin) {
   history.replaceState(null, "", location.pathname);
