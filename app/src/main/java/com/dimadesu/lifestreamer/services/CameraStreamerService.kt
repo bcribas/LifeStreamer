@@ -798,6 +798,17 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
             }
         }
         serviceScope.launch {
+            // A saved change reaches the streamer later (the camera takes its time, or the live
+            // had to stop first): tell the pages then too, so "waiting" does not linger
+            val video = (streamer as? IVideoSingleStreamer)?.videoConfigFlow ?: return@launch
+            val audio = (streamer as? io.github.thibaultbee.streampack.core.streamers.single.IAudioSingleStreamer)
+                ?.audioConfigFlow ?: return@launch
+            kotlinx.coroutines.flow.combine(video, audio) { v, a -> v to a }.drop(1).collectLatest {
+                delay(300)
+                RemoteControlManager.broadcastSettingsChanged()
+            }
+        }
+        serviceScope.launch {
             // Also what creates the controller, so its state (armed or not) is known from the start
             recordingController.statusFlow.collect {
                 RemoteControlManager.broadcastState()
