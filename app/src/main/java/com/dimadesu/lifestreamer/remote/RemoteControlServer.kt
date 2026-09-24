@@ -57,6 +57,7 @@ class RemoteControlServer(
     private val controller: CompositionController,
     private val cameraControls: com.dimadesu.lifestreamer.camera.CameraControlManager,
     private val livePreview: LivePreviewTap,
+    private val sources: com.dimadesu.lifestreamer.sources.SourceController,
     private val hooks: Hooks
 ) {
     /**
@@ -701,6 +702,30 @@ class RemoteControlServer(
                 }
             }
 
+            "/api/source" -> {
+                // The whole picture's source. Switching can take seconds (and a permission on the
+                // phone), so it is accepted here and its result comes back with the state
+                val choice = com.dimadesu.lifestreamer.sources.SourceChoice.parse(
+                    parse<RemoteDto.SourceRequest>(request.body)?.source
+                )
+                if (choice == null) {
+                    respondJson(output, 400, RemoteDto.OkResponse(false, "Unknown source"))
+                    return
+                }
+                val verdict = com.dimadesu.lifestreamer.sources.SourceRules.verdict(choice, sources.context())
+                val refused = when {
+                    controller.isCompositionActive -> "A composition is on: choose each layer's source"
+                    !verdict.available -> verdict.reason
+                    else -> null
+                }
+                if (refused != null) {
+                    respondJson(output, 409, RemoteDto.OkResponse(false, refused))
+                    return
+                }
+                launchStructural("Switching the source") { sources.switchTopLevel(choice) }
+                respondJson(output, 202, RemoteDto.OkResponse(true))
+            }
+
             "/api/camera" -> {
                 val body = parse<RemoteDto.CameraControlRequest>(request.body)
                 val key = body?.key
@@ -950,9 +975,28 @@ class RemoteControlServer(
                     active = it.kind == controller.pipSource.value
                 )
             },
-            cameraTargets = cameraTargets()
+            cameraTargets = cameraTargets(),
+            source = sourceState()
         )
     }
+
+    private fun sourceState(): RemoteDto.SourceDto = RemoteDto.SourceDto(
+        current = sources.currentTopLevel()?.key,
+        appOpen = sources.host != null,
+        pending = sources.pending,
+        options = sources.topLevelOptions().map {
+            RemoteDto.SourceOptionDto(
+                key = it.choice.key,
+                kind = it.choice.key.substringBefore(':'),
+                label = it.label,
+                detail = it.detail,
+                available = it.verdict.available,
+                reason = it.verdict.reason,
+                phoneAction = it.verdict.phoneAction,
+                active = it.active
+            )
+        }
+    )
 
     /** The camera controls, rounded like the zoom so a value cannot jitter the fingerprint. */
     private fun cameraTargets(): List<RemoteDto.CameraTargetDto> =

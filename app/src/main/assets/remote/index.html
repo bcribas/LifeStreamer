@@ -233,6 +233,13 @@
   <section class="tab" id="tab-cameras" hidden>
     <div class="cols">
       <div>
+        <div id="srcSection" hidden>
+          <h2>Source</h2>
+          <div class="panel" id="srcBox">
+            <div class="row seg" id="srcOptions"></div>
+            <div class="muted" id="srcNote" style="margin-top:6px"></div>
+          </div>
+        </div>
         <h2>Composition</h2>
         <div class="panel" id="compBox">
           <div class="row" style="align-items:center;justify-content:space-between">
@@ -438,6 +445,7 @@ function render(s) {
   renderRecording(s.recording);
   // Starting or stopping changes what can be edited and what waits: fetch them again
   if (wasLive !== null && wasLive !== lastLiveKey) settingsChanged();
+  renderSource(s);
   renderComposition(s);
   renderThermal(s.thermal);
   renderPresets(s.presets, s.activePresetId);
@@ -632,6 +640,49 @@ document.getElementById("confirm").addEventListener("click", function (e) {
 // ---- composition ----
 
 var BG_SWATCHES = ["#000000", "#FFFFFF", "#404040", "#00B140", "#0047BB"];
+
+/**
+ * What feeds the whole picture, and the rest that can (without a composition; in one, each layer
+ * has its own). A source that asks for a permission does so on the phone, and says so here.
+ */
+function renderSource(s) {
+  var section = document.getElementById("srcSection");
+  var src = s.source;
+  if (!src || s.composition) { section.hidden = true; return; }
+  section.hidden = false;
+  var box = document.getElementById("srcOptions");
+  box.innerHTML = "";
+  var reasons = [];
+  var asks = false;
+  src.options.forEach(function (o) {
+    var b = document.createElement("button");
+    var ask = o.available && o.phoneAction;
+    if (ask) asks = true;
+    b.textContent = o.label + (o.detail ? " · " + o.detail : "") + (ask ? " ⚑" : "");
+    if (o.active) b.className = "on";
+    b.disabled = !o.available;
+    b.title = o.reason || o.phoneAction || "";
+    b.onclick = function () { chooseSource(o, s); };
+    box.appendChild(b);
+    if (!o.available && o.reason && src.appOpen) reasons.push(o.label + ": " + o.reason);
+  });
+  var notes = [];
+  if (src.pending) notes.push("Waiting on the phone: " + src.pending + ".");
+  if (!src.appOpen) notes.push("The app is closed on the phone: only the cameras can be switched.");
+  if (asks) notes.push("⚑ asks for a permission on the phone first.");
+  if (reasons.length) notes.push(reasons.join(" · "));
+  document.getElementById("srcNote").textContent = notes.join(" ");
+}
+
+function chooseSource(o, s) {
+  if (o.active) return;
+  var go = function () { api("/api/source", { source: o.key }); };
+  if (!s.streaming) { go(); return; }
+  confirmDialog("Switch the source?",
+    "The picture freezes for a moment while it switches" +
+    (o.phoneAction ? ", and first: " + o.phoneAction.toLowerCase() : "") + ".",
+    "Switch", false).then(function (yes) { if (yes) go(); });
+}
 
 function renderComposition(s) {
   var on = !!s.composition;

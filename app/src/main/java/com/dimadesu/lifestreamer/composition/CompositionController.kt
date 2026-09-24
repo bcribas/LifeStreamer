@@ -471,6 +471,9 @@ class CompositionController(
     private fun currentPipLayer(target: ICompositeVideoSource) =
         target.layoutFlow.value[CompositionLayers.PIP] ?: sources.pipLayer()
 
+    /** Whether two cameras can run at the same time on this phone. */
+    fun canRunTogether(a: String, b: String): Boolean = capabilities.canRunTogether(a, b)
+
     /** One row per kind, with why it cannot be used right now, for the page and the app's picker. */
     data class PipSourceOption(val kind: PipSourceKind, val available: Boolean, val reason: String?)
 

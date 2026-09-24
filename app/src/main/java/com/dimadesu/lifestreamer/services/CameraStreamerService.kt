@@ -163,6 +163,27 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
     }
 
     /**
+     * The video source as the phone and the page choose it: cameras from here, the rest through
+     * the app's screen while it is alive (it registers as the host).
+     */
+    val sourceController by lazy {
+        com.dimadesu.lifestreamer.sources.SourceController(
+            scope = serviceScope,
+            storage = storageRepository,
+            composition = compositionController,
+            videoSource = { (streamer as? IWithVideoSource)?.videoInput?.sourceFlow?.value },
+            switchCamera = { id ->
+                switchVideoSource(io.github.thibaultbee.streampack.core.elements.sources.video.camera.CameraSourceFactory(id))
+            },
+            restoreMicAudio = {
+                (streamer as? io.github.thibaultbee.streampack.core.interfaces.IWithAudioSource)
+                    ?.setAudioSource(com.dimadesu.lifestreamer.audio.ConditionalAudioSourceFactory())
+                triggerBluetoothMicActivation()
+            }
+        ).also { it.start() }
+    }
+
+    /**
      * A small JPEG of what goes out, for the remote page, taken only while a page asks. When the
      * phone is SEVERE it slows to one frame every two seconds (the page is then the only view, the
      * phone's own preview being off), and it pauses when CRITICAL.
@@ -798,6 +819,7 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                     compositionController,
                     cameraControls,
                     livePreview,
+                    sourceController,
                     config.port,
                     pin,
                     remoteControlHooks
@@ -819,6 +841,9 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         serviceScope.launch {
             cameraControls.start()
             cameraControls.state.collect { RemoteControlManager.broadcastState() }
+        }
+        serviceScope.launch {
+            sourceController.changes.collect { RemoteControlManager.broadcastState() }
         }
         serviceScope.launch {
             // A manual exposure must fit in a frame, so the cameras' frame rate bounds it
@@ -2315,6 +2340,7 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
 
         fun compositionController() = this@CameraStreamerService.compositionController
         fun cameraControls() = this@CameraStreamerService.cameraControls
+        fun sourceController() = this@CameraStreamerService.sourceController
 
         fun thermalStateFlow() = this@CameraStreamerService.thermalMonitor.stateFlow
 

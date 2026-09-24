@@ -52,6 +52,7 @@ import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.dimadesu.lifestreamer.ApplicationConstants
 import com.dimadesu.lifestreamer.data.storage.DataStoreRepository
 import com.dimadesu.lifestreamer.databinding.MainFragmentBinding
@@ -282,6 +283,19 @@ class PreviewFragment : Fragment(R.layout.main_fragment) {
                 val pin = DataStoreRepository(context, context.dataStore)
                     .remoteControlConfigFlow.first()?.pin.orEmpty()
                 RemoteControlQrDialog.show(context, pin)
+            }
+        }
+
+        // A source asked for from the page that needs a permission: shown here, where the
+        // dialog can be answered, and the (possibly dimmed, mounted) screen lit for it
+        viewLifecycleOwner.lifecycleScope.launch {
+            viewLifecycleOwner.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.RESUMED) {
+                previewViewModel.pendingSourceChoice.collect { choice ->
+                    if (choice != null) {
+                        (activity as? MainActivity)?.screenPower?.onUserTouch()
+                        previewViewModel.resolvePendingSource(mediaProjectionLauncher)
+                    }
+                }
             }
         }
 

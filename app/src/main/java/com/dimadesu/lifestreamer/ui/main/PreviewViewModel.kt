@@ -138,7 +138,8 @@ import kotlinx.coroutines.withContext
 
 
 class PreviewViewModel(private val application: Application) : ObservableViewModel(),
-    com.dimadesu.lifestreamer.power.ThermalActuator, ExternalPipSourceProvider {
+    com.dimadesu.lifestreamer.power.ThermalActuator, ExternalPipSourceProvider,
+    com.dimadesu.lifestreamer.sources.AppSourceHost {
     private val storageRepository = DataStoreRepository(application, application.dataStore)
     private val streamConfigurationHelper = StreamConfigurationHelper(storageRepository)
     private val rotationRepository = RotationRepository.getInstance(application)
@@ -1413,6 +1414,8 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
 
                             // Screen and USB layers need grants that only this screen can ask for.
                             binder.compositionController().externalPipProvider = this@PreviewViewModel
+                            // The page switches sources through this screen while it is alive
+                            binder.sourceController().host = this@PreviewViewModel
 
                             // The buttons, sliders and panel follow the cameras' controls,
                             // whoever changed them (the remote page too)
@@ -1495,33 +1498,25 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
 
         Log.i(TAG, "Initializing streamer sources - Audio enabled: ${currentStreamer.withAudio}, Video enabled: ${currentStreamer.withVideo}")
 
-        // Set audio source and video source only if not streaming
-        if (currentStreamer.withAudio) {
-            Log.i(TAG, "Audio source is enabled. Setting audio based on video source")
-            setAudioSourceBasedOnVideoSource()
-        } else {
-            Log.i(TAG, "Audio source is disabled")
-        }
-
+        // Video first: the sound follows from what the picture is
+        var keepAudio = false
         if (currentStreamer.withVideo) {
             if (ActivityCompat.checkSelfPermission(
                     application,
                     Manifest.permission.CAMERA
                 ) == PackageManager.PERMISSION_GRANTED
             ) {
-                if (currentStreamer.videoInput?.sourceFlow?.value is ICompositeVideoSource) {
-                    // Turned on from the remote page while this screen was closed. Replacing it
-                    // with a camera here would switch the composition off just by opening the app.
-                    Log.i(TAG, "Keeping the running composition instead of resetting to camera")
-                } else {
-                    Log.i(TAG, "Camera permission granted, setting video source")
-                    currentStreamer.setVideoSource(CameraSourceFactory(application))
-                }
+                keepAudio = adoptOrSetVideoSource(currentStreamer)
             } else {
                 Log.w(TAG, "Camera permission not granted")
             }
         } else {
             Log.i(TAG, "Video source is disabled")
+        }
+
+        if (currentStreamer.withAudio && !keepAudio) {
+            Log.i(TAG, "Audio source is enabled. Setting audio based on video source")
+            setAudioSourceBasedOnVideoSource()
         }
 
         // Set up flow observers for the service-based streamer
@@ -1532,6 +1527,46 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
         val audioSourceLabel = getAudioSourceLabel(initialAudioSource)
         _audioSourceIndicatorLiveData.postValue(audioSourceLabel)
         Log.i(TAG, "Initial audio source: $audioSourceLabel (${initialAudioSource?.javaClass?.simpleName})")
+    }
+
+    /**
+     * Keeps a source this screen did not set (chosen from the page while it was closed) instead
+     * of resetting to the default camera just by opening the app. Returns true when the running
+     * sound must be kept too (an RTMP source brings its own).
+     */
+    private suspend fun adoptOrSetVideoSource(currentStreamer: SingleStreamer): Boolean {
+        when (val existing = currentStreamer.videoInput?.sourceFlow?.value) {
+            is ICompositeVideoSource -> {
+                // Turned on from the remote page while this screen was closed. Replacing it
+                // with a camera here would switch the composition off just by opening the app.
+                Log.i(TAG, "Keeping the running composition instead of resetting to camera")
+            }
+            is ICameraSource -> {
+                lastUsedCameraId = existing.cameraId
+                Log.i(TAG, "Keeping camera ${existing.cameraId}")
+            }
+            is RTMPVideoSource -> {
+                // Still playing since the page chose it: watch it again, as if chosen here
+                val index = sourceController?.lastRtmp ?: 1
+                _activeRtmpIndex.postValue(index)
+                monitorRtmpConnection(existing.player)
+                Log.i(TAG, "Keeping RTMP source $index")
+                return true
+            }
+            is io.github.thibaultbee.streampack.core.elements.sources.IMediaProjectionSource -> {
+                _isScreenSource.postValue(true)
+                Log.i(TAG, "Keeping the screen source")
+            }
+            else -> {
+                // Nothing, a placeholder, or a USB camera whose helper died with the old screen
+                Log.i(TAG, "Camera permission granted, setting video source")
+                val cameraId = lastUsedCameraId ?: serviceBinder?.compositionController()?.primaryCameraHint
+                currentStreamer.setVideoSource(
+                    cameraId?.let { CameraSourceFactory(it) } ?: CameraSourceFactory(application)
+                )
+            }
+        }
+        return false
     }
 
     /**
@@ -4805,6 +4840,8 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
      * was to kill the app.
      */
     private fun onVideoSourceChanged(source: IVideoSource?) {
+        // The page names the current source from this screen's flags, set around the switch
+        sourceController?.changed()
         val isComposite = source is ICompositeVideoSource
         val wasComposite = _isCompositeSource.value == true
 
@@ -4864,6 +4901,146 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
      * With a composition running that silently destroyed it, which is not what anyone means by
      * "use this camera" when two are already on screen.
      */
+    // region the whole picture's source, for the page (AppSourceHost)
+
+    private val sourceController get() = serviceBinder?.sourceController()
+
+    private val usbManager by lazy {
+        application.getSystemService(Context.USB_SERVICE) as android.hardware.usb.UsbManager
+    }
+
+    override val canAskOnPhone: Boolean get() = isUiInForeground
+
+    override val captureGranted: Boolean get() = usableProjection() != null
+
+    override val usbConnected: Boolean
+        get() = runCatching { usbManager.deviceList.isNotEmpty() }.getOrDefault(false)
+
+    override val usbPermitted: Boolean
+        get() = runCatching { usbManager.deviceList.values.any { usbManager.hasPermission(it) } }.getOrDefault(false)
+
+    override val topLevelChoice: com.dimadesu.lifestreamer.sources.SourceChoice?
+        get() {
+            if (_isCompositeSource.value == true) return null
+            _activeRtmpIndex.value?.let { return com.dimadesu.lifestreamer.sources.SourceChoice.Rtmp(it) }
+            if (_userToggledUvc.value == true) return com.dimadesu.lifestreamer.sources.SourceChoice.Usb
+            if (_isScreenSource.value == true) return com.dimadesu.lifestreamer.sources.SourceChoice.Screen
+            return (serviceStreamer?.videoInput?.sourceFlow?.value as? ICameraSource)?.cameraId
+                ?.let { com.dimadesu.lifestreamer.sources.SourceChoice.Camera(it) }
+        }
+
+    /** A switch asked for by the page that waits for a permission on the phone. */
+    private val _pendingSourceChoice = kotlinx.coroutines.flow.MutableStateFlow<com.dimadesu.lifestreamer.sources.SourceChoice?>(null)
+    val pendingSourceChoice: kotlinx.coroutines.flow.StateFlow<com.dimadesu.lifestreamer.sources.SourceChoice?> =
+        _pendingSourceChoice
+    private var pendingSourceJob: Job? = null
+    private val topLevelMutex = Mutex()
+
+    override fun switchTopLevel(choice: com.dimadesu.lifestreamer.sources.SourceChoice) {
+        viewModelScope.launch { performTopLevel(choice, launcher = null) }
+    }
+
+    /**
+     * Finishes a switch the page asked for that needs a permission, with the screen's launcher:
+     * called by the fragment once it is in front (the dialog shows there).
+     */
+    fun resolvePendingSource(launcher: androidx.activity.result.ActivityResultLauncher<Intent>) {
+        val choice = _pendingSourceChoice.value ?: return
+        _pendingSourceChoice.value = null
+        viewModelScope.launch { performTopLevel(choice, launcher) }
+    }
+
+    /**
+     * The phone's toggles, composed: leave what is on back to a camera (the camera asked for, when
+     * that is the target), then enter the new source. A switch that needs screen capture and has
+     * no launcher waits for the fragment, which shows the dialog.
+     */
+    private suspend fun performTopLevel(
+        choice: com.dimadesu.lifestreamer.sources.SourceChoice,
+        launcher: androidx.activity.result.ActivityResultLauncher<Intent>?,
+    ) = topLevelMutex.withLock {
+        val needsCapture = (choice is com.dimadesu.lifestreamer.sources.SourceChoice.Rtmp ||
+                choice is com.dimadesu.lifestreamer.sources.SourceChoice.Screen) &&
+                android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q && usableProjection() == null
+        if (needsCapture && launcher == null) {
+            askOnPhone(choice, com.dimadesu.lifestreamer.sources.SourceRules.ACCEPT_CAPTURE)
+            return@withLock
+        }
+        val current = topLevelChoice
+        if (current == choice) return@withLock
+        if (choice is com.dimadesu.lifestreamer.sources.SourceChoice.Camera) lastUsedCameraId = choice.id
+        Log.i(TAG, "Switching the whole picture from $current to $choice")
+        when (current) {
+            is com.dimadesu.lifestreamer.sources.SourceChoice.Rtmp ->
+                // One RTMP to another goes straight across; anything else goes back to a camera first
+                if (choice !is com.dimadesu.lifestreamer.sources.SourceChoice.Rtmp) {
+                    toggleVideoSource(null, current.index)
+                    awaitSource { it is ICameraSource }
+                }
+            com.dimadesu.lifestreamer.sources.SourceChoice.Usb -> {
+                toggleUvcSource()
+                awaitSource { it is ICameraSource }
+            }
+            com.dimadesu.lifestreamer.sources.SourceChoice.Screen -> {
+                toggleScreenSource(null)
+                awaitSource { it is ICameraSource }
+            }
+            else -> Unit
+        }
+        when (choice) {
+            is com.dimadesu.lifestreamer.sources.SourceChoice.Camera ->
+                if ((serviceStreamer?.videoInput?.sourceFlow?.value as? ICameraSource)?.cameraId != choice.id) {
+                    selectCamera(choice.id)
+                }
+            is com.dimadesu.lifestreamer.sources.SourceChoice.Rtmp -> toggleVideoSource(launcher, choice.index)
+            com.dimadesu.lifestreamer.sources.SourceChoice.Usb -> {
+                if (!usbPermitted) waitOnPhone(choice, com.dimadesu.lifestreamer.sources.SourceRules.ALLOW_USB)
+                toggleUvcSource()
+            }
+            com.dimadesu.lifestreamer.sources.SourceChoice.Screen -> toggleScreenSource(launcher)
+            com.dimadesu.lifestreamer.sources.SourceChoice.TestImage -> Unit
+        }
+        if (launcher != null && needsCapture) {
+            waitOnPhone(choice, com.dimadesu.lifestreamer.sources.SourceRules.ACCEPT_CAPTURE)
+        }
+        sourceController?.changed()
+    }
+
+    /** Waits (a while) for the video source to become what [done] says. */
+    private suspend fun awaitSource(done: (Any?) -> Boolean) {
+        val flow = serviceStreamer?.videoInput?.sourceFlow ?: return
+        kotlinx.coroutines.withTimeoutOrNull(SOURCE_SWITCH_WAIT_MS) { flow.first { done(it) } }
+            ?: Log.w(TAG, "The source switch did not land in time")
+    }
+
+    /**
+     * Keeps [choice] for the fragment to finish with its launcher, and says on the page what the
+     * phone waits for. Given up after a while: nobody may be at the phone.
+     */
+    private fun askOnPhone(choice: com.dimadesu.lifestreamer.sources.SourceChoice, text: String) {
+        _pendingSourceChoice.value = choice
+        waitOnPhone(choice, text)
+    }
+
+    /** Says [text] on the page until [choice] is on, or it is given up. */
+    private fun waitOnPhone(choice: com.dimadesu.lifestreamer.sources.SourceChoice, text: String) {
+        sourceController?.setPending(text)
+        pendingSourceJob?.cancel()
+        pendingSourceJob = viewModelScope.launch {
+            val done = kotlinx.coroutines.withTimeoutOrNull(PHONE_ACTION_WAIT_MS) {
+                while (topLevelChoice != choice) delay(500)
+            } != null
+            if (!done) {
+                if (_pendingSourceChoice.value == choice) _pendingSourceChoice.value = null
+                val name = sourceController?.label(choice) ?: choice.key
+                _streamerErrorLiveData.postValue("Nothing was accepted on the phone for $name")
+            }
+            sourceController?.setPending(null)
+        }
+    }
+
+    // endregion
+
     /**
      * Switches the single source to camera [id], serialized with the other switches and
      * remembered as the camera to come back to (the buttons used to set it on StreamPack directly,
@@ -5248,6 +5425,10 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
             serviceBinder?.compositionController()?.let {
                 if (it.externalPipProvider === this) it.externalPipProvider = null
             }
+            serviceBinder?.sourceController()?.let {
+                if (it.host === this) it.host = null
+                it.setPending(null)
+            }
         } catch (_: Throwable) {
         }
         
@@ -5544,6 +5725,12 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
 
     companion object {
         private const val TAG = "PreviewViewModel"
+
+        /** How long a source switch may take to land. */
+        private const val SOURCE_SWITCH_WAIT_MS = 8_000L
+
+        /** How long a permission asked for by the page waits on the phone. */
+        private const val PHONE_ACTION_WAIT_MS = 90_000L
 
         /** Layer ids of the composition built by [toggleCompositeSource]. */
         private const val COMPOSITION_LAYER_MAIN = "main"

@@ -47,8 +47,42 @@ object RemoteDto {
         val pipSources: List<PipSourceDto>,
         val recording: RecordingDto,
         /** Every camera in use and its controls: each camera layer, or the one camera. */
-        val cameraTargets: List<CameraTargetDto> = emptyList()
+        val cameraTargets: List<CameraTargetDto> = emptyList(),
+        /** What feeds the whole picture and what else can; see [SourceDto]. */
+        val source: SourceDto? = null
     )
+
+    /**
+     * The whole picture's source ([current] is null while a composition is on, each layer then
+     * having its own), what can be chosen, and what the phone is waiting for.
+     */
+    @Keep
+    data class SourceDto(
+        val current: String?,
+        /** The app's screen is alive: USB, screen and RTMP sources need it. */
+        val appOpen: Boolean,
+        /** A permission the phone is asking for, to be accepted there; null when none. */
+        val pending: String?,
+        val options: List<SourceOptionDto>
+    )
+
+    /** One source to choose: [key] is what /api/source takes. */
+    @Keep
+    data class SourceOptionDto(
+        val key: String,
+        val kind: String,
+        val label: String,
+        /** The RTMP server's host; never the stream key. */
+        val detail: String?,
+        val available: Boolean,
+        val reason: String?,
+        /** Choosing it asks this on the phone first. */
+        val phoneAction: String?,
+        val active: Boolean
+    )
+
+    @Keep
+    data class SourceRequest(val source: String? = null)
 
     /**
      * Local recording. Bytes and free space change all the time, so they travel in `stats`.
