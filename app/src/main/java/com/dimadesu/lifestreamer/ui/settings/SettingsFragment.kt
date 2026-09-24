@@ -392,13 +392,7 @@ class SettingsFragment : PreferenceFragmentCompat() {
         }
 
         addressPreference?.setOnPreferenceClickListener {
-            if (url == null) {
-                android.widget.Toast.makeText(
-                    requireContext(), "Remote control is not running", android.widget.Toast.LENGTH_SHORT
-                ).show()
-            } else {
-                showRemoteControlQr("$url/#$pin")
-            }
+            com.dimadesu.lifestreamer.remote.RemoteControlQrDialog.show(requireContext(), pin)
             true
         }
 
@@ -416,94 +410,6 @@ class SettingsFragment : PreferenceFragmentCompat() {
                 }
                 true
             }
-    }
-
-    /**
-     * Shows the URL and PIN as a QR code, which is what makes this usable once the phone is
-     * already mounted: the other device points its camera and is in.
-     */
-    private fun showRemoteControlQr(url: String) {
-        // Sized from the SHORT edge of the screen. The phone is normally in landscape while
-        // streaming, where the window is only a few hundred dp tall, and a QR laid out against a
-        // fixed dp size simply gets squeezed by the dialog until a camera can no longer read it.
-        val metrics = resources.displayMetrics
-        val shortEdgePx = minOf(metrics.widthPixels, metrics.heightPixels)
-        val sizePx = (shortEdgePx * 0.62f).toInt().coerceIn(360, 900)
-
-        val bitmap = try {
-            // One pixel per module, then a nearest-neighbour upscale. Drawing straight at the
-            // final size means ~600k setPixel calls on the main thread; this is a few thousand,
-            // and scaling without filtering keeps the module edges hard, which is what a
-            // decoder needs.
-            val matrix = com.google.zxing.qrcode.QRCodeWriter().encode(
-                url,
-                com.google.zxing.BarcodeFormat.QR_CODE,
-                1,
-                1,
-                mapOf(com.google.zxing.EncodeHintType.MARGIN to 4)
-            )
-            val w = matrix.width
-            val h = matrix.height
-            val pixels = IntArray(w * h)
-            for (y in 0 until h) {
-                val row = y * w
-                for (x in 0 until w) {
-                    pixels[row + x] =
-                        if (matrix.get(x, y)) android.graphics.Color.BLACK
-                        else android.graphics.Color.WHITE
-                }
-            }
-            val small = android.graphics.Bitmap.createBitmap(
-                pixels, w, h, android.graphics.Bitmap.Config.ARGB_8888
-            )
-            val scale = maxOf(1, sizePx / w)
-            android.graphics.Bitmap.createScaledBitmap(small, w * scale, h * scale, false)
-        } catch (t: Throwable) {
-            android.widget.Toast.makeText(
-                requireContext(), "Could not build the QR code", android.widget.Toast.LENGTH_SHORT
-            ).show()
-            return
-        }
-
-        val density = metrics.density
-        fun dp(value: Int) = (density * value).toInt()
-
-        val image = android.widget.ImageView(requireContext()).apply {
-            setImageBitmap(bitmap)
-            // The quiet zone has to be white even under the dark theme, where the dialog
-            // background would otherwise bleed right up to the finder patterns.
-            setBackgroundColor(android.graphics.Color.WHITE)
-            scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
-            adjustViewBounds = true
-            layoutParams = android.widget.LinearLayout.LayoutParams(sizePx, sizePx).apply {
-                gravity = android.view.Gravity.CENTER_HORIZONTAL
-            }
-        }
-
-        val caption = android.widget.TextView(requireContext()).apply {
-            text = "$url\n\n${getString(R.string.remote_control_qr_message)}"
-            textSize = 12f
-            setPadding(dp(16), dp(12), dp(16), 0)
-            gravity = android.view.Gravity.CENTER_HORIZONTAL
-        }
-
-        val content = android.widget.LinearLayout(requireContext()).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
-            setPadding(dp(8), dp(8), dp(8), dp(8))
-            addView(image)
-            addView(caption)
-        }
-
-        // Landscape leaves very little height, so the content scrolls rather than being clipped
-        // or shrunk. setMessage is deliberately not used: its text competes with the image for
-        // the same scarce height.
-        val scroll = android.widget.ScrollView(requireContext()).apply { addView(content) }
-
-        androidx.appcompat.app.AlertDialog.Builder(requireContext())
-            .setTitle(R.string.remote_control_qr_title)
-            .setView(scroll)
-            .setPositiveButton(android.R.string.ok, null)
-            .show()
     }
 
     private fun loadSrtTransportSettings() {

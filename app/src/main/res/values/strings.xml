@@ -456,4 +456,6 @@
     <string name="remote_control_warning">Anyone on this network who knows the PIN can control the stream. Use it on a network you trust.</string>
     <string name="remote_control_qr_title">Scan to open the remote control</string>
     <string name="remote_control_qr_message">This code contains the PIN, so anyone who photographs the screen can take control. Close it when the other device is connected.</string>
+    <string name="remote_control_qr_waiting">Waiting for Wi-Fi… The code appears as soon as the phone has an address on the network.</string>
+    <string name="remote_control_qr_button">Show the remote control QR code</string>
 </resources>

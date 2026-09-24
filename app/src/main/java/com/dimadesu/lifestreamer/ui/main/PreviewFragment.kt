@@ -53,17 +53,22 @@ import androidx.fragment.app.Fragment
 import androidx.fragment.app.viewModels
 import androidx.lifecycle.lifecycleScope
 import com.dimadesu.lifestreamer.ApplicationConstants
+import com.dimadesu.lifestreamer.data.storage.DataStoreRepository
 import com.dimadesu.lifestreamer.databinding.MainFragmentBinding
 import com.dimadesu.lifestreamer.models.StreamOrientation
 import com.dimadesu.lifestreamer.models.StreamStatus
+import com.dimadesu.lifestreamer.remote.RemoteControlManager
+import com.dimadesu.lifestreamer.remote.RemoteControlQrDialog
 import com.dimadesu.lifestreamer.utils.DialogUtils
 import com.dimadesu.lifestreamer.utils.PermissionManager
+import com.dimadesu.lifestreamer.utils.dataStore
 import io.github.thibaultbee.streampack.core.interfaces.IStreamer
 import io.github.thibaultbee.streampack.core.interfaces.IWithVideoSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.IPreviewableSource
 import io.github.thibaultbee.streampack.core.streamers.single.SingleStreamer
 import io.github.thibaultbee.streampack.ui.views.PreviewView
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import android.widget.Toast
 import androidx.core.view.children
@@ -259,6 +264,23 @@ class PreviewFragment : Fragment(R.layout.main_fragment) {
                 binding.srtlaStatsView.stopStatsUpdates()
                 binding.srtlaStatsScrollView.visibility = View.GONE
                 binding.srtlaStatsButton.backgroundTintList = getButtonColorStateList(requireContext(), false)
+            }
+        }
+
+        // The remote control's address changes with the Wi-Fi network, so its QR code is one tap
+        // away here rather than three screens deep in the settings. Hidden while the server is off.
+        viewLifecycleOwner.lifecycleScope.launch {
+            RemoteControlManager.stateFlow.collect { running ->
+                binding.remoteControlQrButton.visibility = if (running) View.VISIBLE else View.GONE
+            }
+        }
+
+        binding.remoteControlQrButton.setOnClickListener {
+            viewLifecycleOwner.lifecycleScope.launch {
+                val context = requireContext()
+                val pin = DataStoreRepository(context, context.dataStore)
+                    .remoteControlConfigFlow.first()?.pin.orEmpty()
+                RemoteControlQrDialog.show(context, pin)
             }
         }
 

@@ -38,6 +38,8 @@ object NetworkAddresses {
      * `WifiManager.connectionInfo`, which returns 0 for non-system apps on modern Android.
      */
     fun localIPv4(context: Context): String? {
+        // Interfaces of cellular networks, kept out of the fallback below.
+        val cellularInterfaces = mutableSetOf<String>()
         runCatching {
             val manager =
                 context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -45,6 +47,10 @@ object NetworkAddresses {
             @Suppress("DEPRECATION")
             manager.allNetworks.forEach { network ->
                 val capabilities = manager.getNetworkCapabilities(network) ?: return@forEach
+                if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+                    manager.getLinkProperties(network)?.interfaceName
+                        ?.let { cellularInterfaces += it }
+                }
                 val isLocal =
                     capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
                             capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
@@ -58,9 +64,13 @@ object NetworkAddresses {
         }.onFailure { Log.w(TAG, "Could not read link properties: ${it.message}") }
 
         // Covers a Wi-Fi hotspot or USB tethering, where there is no "network" to ask about.
+        // Without the cellular filter, losing Wi-Fi with mobile data on would land here and hand
+        // out the carrier address, which nothing on the LAN can reach; null lets the caller say
+        // it is waiting for Wi-Fi instead.
         return runCatching {
             NetworkInterface.getNetworkInterfaces().asSequence()
-                .filter { it.isUp && !it.isLoopback }
+                // "v4-" is the IPv4 (464XLAT) interface stacked on an IPv6-only cellular one.
+                .filter { it.isUp && !it.isLoopback && it.name.removePrefix("v4-") !in cellularInterfaces }
                 .flatMap { it.inetAddresses.asSequence() }
                 .firstOrNull { it is Inet4Address && !it.isLoopbackAddress }
                 ?.hostAddress
