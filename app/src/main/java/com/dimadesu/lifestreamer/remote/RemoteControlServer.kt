@@ -56,6 +56,7 @@ class RemoteControlServer(
     private val port: Int,
     private val controller: CompositionController,
     private val cameraControls: com.dimadesu.lifestreamer.camera.CameraControlManager,
+    private val livePreview: LivePreviewTap,
     private val hooks: Hooks
 ) {
     /**
@@ -682,6 +683,22 @@ class RemoteControlServer(
                     }
                 }
                 respondJson(output, 200, RemoteDto.OkResponse(true))
+            }
+
+            "/api/preview.jpg" -> {
+                // A picture of what goes out, taken now or shared with another page within its
+                // interval; nothing (and why) when there is no live or the phone is too hot
+                val frame = runCatching {
+                    kotlinx.coroutines.runBlocking { livePreview.frame() }
+                }.getOrElse { LivePreviewTap.Frame(null, "Preview failed: ${it.message}", 0) }
+                val jpeg = frame.jpeg
+                if (jpeg == null) {
+                    respond(output, 204, "text/plain", ByteArray(0), "Cache-Control: no-store",
+                        "X-Preview-Reason: ${frame.reason ?: "No picture"}")
+                } else {
+                    respond(output, 200, "image/jpeg", jpeg, "Cache-Control: no-store",
+                        "X-Preview-Age-Ms: ${System.currentTimeMillis() - frame.takenAtMs}")
+                }
             }
 
             "/api/camera" -> {

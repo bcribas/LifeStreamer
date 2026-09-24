@@ -163,6 +163,27 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
     }
 
     /**
+     * A small JPEG of what goes out, for the remote page, taken only while a page asks. When the
+     * phone is SEVERE it slows to one frame every two seconds (the page is then the only view, the
+     * phone's own preview being off), and it pauses when CRITICAL.
+     */
+    val livePreview by lazy {
+        com.dimadesu.lifestreamer.remote.LivePreviewTap(
+            scope = serviceScope,
+            videoInput = { (streamer as? IWithVideoSource)?.videoInput },
+            heat = {
+                when (thermalMonitor.stateFlow.value.level) {
+                    com.dimadesu.lifestreamer.power.ThermalLevel.CRITICAL ->
+                        com.dimadesu.lifestreamer.remote.LivePreviewTap.Heat.CRITICAL
+                    com.dimadesu.lifestreamer.power.ThermalLevel.SEVERE ->
+                        com.dimadesu.lifestreamer.remote.LivePreviewTap.Heat.SEVERE
+                    else -> com.dimadesu.lifestreamer.remote.LivePreviewTap.Heat.NORMAL
+                }
+            }
+        )
+    }
+
+    /**
      * Thermal watching lives here, not in a ViewModel: the stream outlives the UI, and the window
      * that matters most is the one where the UI is gone.
      */
@@ -776,6 +797,7 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                     this@CameraStreamerService,
                     compositionController,
                     cameraControls,
+                    livePreview,
                     config.port,
                     pin,
                     remoteControlHooks
@@ -1108,6 +1130,7 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         try { SrtlaManager.stopMoblink() } catch (_: Exception) {}
 
         try { RemoteControlManager.stop() } catch (_: Throwable) {}
+        try { livePreview.release() } catch (_: Throwable) {}
         try { thermalPolicy.stop() } catch (_: Throwable) {}
         try { thermalMonitor.stop() } catch (_: Throwable) {}
 
