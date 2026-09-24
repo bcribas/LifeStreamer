@@ -235,6 +235,14 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
         setupAudioLevelMonitoring()
         
         // Apply any pending configs that were skipped while in background
+        applyPendingConfigs("UI resumed")
+    }
+
+    /**
+     * Applies the video and audio configs that had to wait: for the UI to come back, or for the
+     * live and the recording to stop. One the streamer already runs is dropped.
+     */
+    private fun applyPendingConfigs(reason: String) {
         val savedVideoConfig = pendingVideoConfig
         val savedAudioConfig = pendingAudioConfig
         pendingVideoConfig = null
@@ -246,16 +254,16 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                 _serviceReady.first { it }
                 val streamer = serviceStreamer
                 if (streamer != null && !isPipelineBusy()) {
-                    savedVideoConfig?.let { config ->
+                    savedVideoConfig?.takeIf { it != streamer.videoConfigFlow.value }?.let { config ->
                         try {
-                            Log.i(TAG, "Applying pending video config after UI resumed")
+                            Log.i(TAG, "Applying pending video config after $reason")
                             streamer.setVideoConfig(config)
                         } catch (t: Throwable) {
                             Log.e(TAG, "setVideoConfig failed (deferred)", t)
                             _streamerErrorLiveData.postValue("setVideoConfig: ${t.message ?: t::class.java.simpleName}")
                         }
                     }
-                    savedAudioConfig?.let { config ->
+                    savedAudioConfig?.takeIf { it != streamer.audioConfigFlow.value }?.let { config ->
                         // Check permission before applying audio config
                         if (ActivityCompat.checkSelfPermission(
                                 application,
@@ -267,7 +275,7 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                             return@let
                         }
                         try {
-                            Log.i(TAG, "Applying pending audio config after UI resumed")
+                            Log.i(TAG, "Applying pending audio config after $reason")
                             applyAudioConfigSafely(streamer, config)
                         } catch (t: Throwable) {
                             Log.e(TAG, "setAudioConfig failed (deferred)", t)
@@ -277,7 +285,10 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                 } else if (streamer == null) {
                     Log.w(TAG, "Cannot apply pending configs - streamer is null even after service ready")
                 } else {
-                    Log.i(TAG, "Skipping pending configs - streamer is streaming")
+                    // Streaming again: keep them for the next stop
+                    Log.i(TAG, "Keeping pending configs - streamer is streaming")
+                    if (pendingVideoConfig == null) pendingVideoConfig = savedVideoConfig
+                    if (pendingAudioConfig == null) pendingAudioConfig = savedAudioConfig
                 }
             }
         }
@@ -1504,6 +1515,11 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
             sourcesStreamingFlow.collect { isStreaming ->
                 if (!isStreaming) {
                     flushPendingPreviewShortEdge()
+                    // A config changed during the live (here or on the remote page) applies
+                    // now, not at the next live. A reconnection restarts with what it had.
+                    if (isUiInForeground && service?.isReconnecting?.value != true) {
+                        applyPendingConfigs("the pipeline stopped")
+                    }
                 }
             }
         }
@@ -1753,9 +1769,11 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
         viewModelScope.launch {
             storageRepository.audioConfigFlow
                 .collect { config ->
-                    // Don't change audio config while streaming to avoid configuration conflicts
+                    // Don't change audio config while streaming to avoid configuration conflicts;
+                    // it applies when the pipeline stops
                     if (isPipelineBusy()) {
-                        Log.i(TAG, "Skipping audio config change - streamer is currently streaming")
+                        Log.i(TAG, "Deferring audio config change - streamer is currently streaming")
+                        pendingAudioConfig = config
                         return@collect
                     }
                     
@@ -1789,9 +1807,11 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
         viewModelScope.launch {
             storageRepository.videoConfigFlow
                 .collect { config ->
-                    // Don't change video config while streaming to avoid configuration conflicts
+                    // Don't change video config while streaming to avoid configuration conflicts;
+                    // it applies when the pipeline stops
                     if (isPipelineBusy()) {
-                        Log.i(TAG, "Skipping video config change - streamer is currently streaming")
+                        Log.i(TAG, "Deferring video config change - streamer is currently streaming")
+                        pendingVideoConfig = config
                         return@collect
                     }
                     
