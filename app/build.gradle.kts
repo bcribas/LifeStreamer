@@ -79,6 +79,10 @@ android {
             pickFirsts += setOf("**/*.so")
         }
     }
+    testOptions {
+        // JVM tests of code that logs (android.util.Log) would otherwise throw "not mocked"
+        unitTests.isReturnDefaultValues = true
+    }
 
 }
 
