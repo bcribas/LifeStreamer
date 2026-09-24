@@ -1500,39 +1500,52 @@ class PreviewFragment : Fragment(R.layout.main_fragment) {
 
 
     /**
-     * Picks what feeds the second layer. Replaced by the layer picker once the composition UI
-     * exists; for now it is the only way to choose something other than the test image.
+     * Picks what a layer shows: the selected layer's source with the composition on, or what the
+     * inset will show when it is turned on. The same choices as on the remote page, with the
+     * reason next to what cannot be chosen now.
      */
     private fun showCompositionSourcePicker() {
-        val options = com.dimadesu.lifestreamer.composition.PipSourceKind.entries.toTypedArray()
-        val current = previewViewModel.compositionPipSource
-        val checked = options.indexOf(current).coerceAtLeast(0)
+        val composing = previewViewModel.isCompositeSource.value == true
+        val layerId: String
+        val options: List<com.dimadesu.lifestreamer.sources.SourceController.Option>
+        if (composing) {
+            layerId = previewViewModel.layerForSourcePicker() ?: return
+            options = previewViewModel.layerSourceOptions(layerId)
+        } else {
+            val preset = previewViewModel.presetSourceOptions() ?: return
+            layerId = preset.first
+            options = preset.second
+        }
+        if (options.isEmpty()) return
 
         // Unavailable options stay on the list, labelled with the reason. Hiding them would leave
         // the operator with no answer to "why can't I?".
-        val reasons = options.map { previewViewModel.reasonPipSourceUnavailable(it) }
-        val labels = options.mapIndexed { index, option ->
-            reasons[index]?.let { "${option.label} — $it" } ?: option.label
+        val labels = options.map { option ->
+            buildString {
+                append(option.label)
+                option.detail?.let { append(" · ").append(it) }
+                if (!option.verdict.available) append(" — ").append(option.verdict.reason)
+            }
         }.toTypedArray()
+        val checked = options.indexOfFirst { it.active }
+        val title = if (composing) {
+            "Source for ${previewViewModel.layerName(layerId)}"
+        } else {
+            "Inset source (when the composition is on)"
+        }
 
         AlertDialog.Builder(requireContext())
-            .setTitle("Second layer source")
+            .setTitle(title)
             .setSingleChoiceItems(labels, checked) { dialog, which ->
                 val chosen = options[which]
-                val reason = reasons[which]
-                if (reason != null) {
-                    Toast.makeText(requireContext(), reason, Toast.LENGTH_LONG).show()
+                if (!chosen.verdict.available) {
+                    Toast.makeText(requireContext(), chosen.verdict.reason, Toast.LENGTH_LONG).show()
                     return@setSingleChoiceItems
                 }
-                previewViewModel.setCompositionPipSource(chosen)
-                when (chosen) {
-                    com.dimadesu.lifestreamer.composition.PipSourceKind.SCREEN ->
-                        previewViewModel.ensureMediaProjectionForComposition(mediaProjectionLauncher)
-
-                    com.dimadesu.lifestreamer.composition.PipSourceKind.USB ->
-                        previewViewModel.prepareUvcForComposition()
-
-                    else -> Unit
+                if (composing) {
+                    previewViewModel.chooseLayerSource(layerId, chosen.choice)
+                } else {
+                    previewViewModel.presetLayerSource(layerId, chosen.choice)
                 }
                 dialog.dismiss()
             }

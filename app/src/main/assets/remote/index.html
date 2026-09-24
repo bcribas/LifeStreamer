@@ -247,9 +247,7 @@
             <button id="compToggle">Turn on</button>
           </div>
           <div id="compDetails">
-            <div class="muted" style="margin-top:8px">Second layer</div>
-            <div class="row seg" id="pipSources" style="margin-top:4px"></div>
-            <div class="muted" id="pipReason" style="margin-top:4px"></div>
+            <div class="muted" id="compNote" style="margin-top:6px"></div>
             <div class="muted" style="margin-top:8px">Background</div>
             <div class="row" id="bgRow" style="margin-top:4px;align-items:center"></div>
           </div>
@@ -686,35 +684,17 @@ function chooseSource(o, s) {
 
 function renderComposition(s) {
   var on = !!s.composition;
-  document.getElementById("compLabel").textContent = on ? "On" : "Off — only the main camera";
+  document.getElementById("compLabel").textContent = on ? "On — each layer has its own source" : "Off — one source for the whole picture";
   var toggle = document.getElementById("compToggle");
   toggle.textContent = on ? "Turn off" : "Turn on";
   toggle.className = on ? "" : "on";
 
-  var box = document.getElementById("pipSources");
-  box.innerHTML = "";
-  var reasonEl = document.getElementById("pipReason");
-  reasonEl.textContent = "";
-  (s.pipSources || []).forEach(function (p) {
-    var b = document.createElement("button");
-    b.textContent = p.label;
-    if (p.active) b.className = "on";
-    if (!p.available) {
-      b.disabled = true;
-      b.title = p.reason || "";
-    }
-    b.onclick = function () { api("/api/layer/source", { kind: p.kind }); };
-    box.appendChild(b);
-  });
-  // The reasons of the unavailable ones, so a disabled button is never a mystery.
-  var why = (s.pipSources || []).filter(function (p) { return !p.available && p.reason; })
-    .map(function (p) { return p.label + ": " + p.reason; });
-  reasonEl.textContent = why.join(" · ");
-
-  var pip = (s.layers || []).filter(function (l) { return l.id === "pip"; })[0];
-  if (pip && pip.onPlaceholder && pip.sourceKind && pip.sourceKind !== "TEST_IMAGE") {
-    reasonEl.textContent = "Showing the test image: the chosen source is not available. " + reasonEl.textContent;
-  }
+  // Each layer has its own source (below, with the layers); what the phone waits for shows here
+  var notes = [];
+  var src = s.source;
+  if (on && src && src.pending) notes.push("Waiting on the phone: " + src.pending + ".");
+  if (on && src && !src.appOpen) notes.push("The app is closed on the phone: USB and screen layers need it.");
+  document.getElementById("compNote").textContent = notes.join(" ");
 
   var bg = document.getElementById("bgRow");
   if (!bg.querySelector("input")) {
@@ -950,24 +930,7 @@ function renderLayers(layers, cameras) {
     head.appendChild(acts);
     panel.appendChild(head);
 
-    var chips = document.createElement("div");
-    chips.className = "row";
-    chips.style.marginTop = "6px";
-    (cameras || []).forEach(function (c) {
-      var b = document.createElement("button");
-      b.textContent = c.name;
-      if (c.id === l.cameraId) b.className = "on";
-      else if (c.usedByLayerId) b.disabled = true;
-      b.onclick = function () {
-        api("/api/layer/camera", { layerId: l.id, cameraId: c.id }).then(function (r) {
-          // A refusal says why — an impossible camera pair, for instance — instead of looking
-          // like a tap that did nothing.
-          if (r && r.ok === false && r.error) showStatus(r.error, "#722");
-        });
-      };
-      chips.appendChild(b);
-    });
-    panel.appendChild(chips);
+    panel.appendChild(buildLayerSourceRow(l));
     panel.appendChild(buildStyleRow(l));
 
     box.appendChild(panel);
@@ -976,6 +939,54 @@ function renderLayers(layers, cameras) {
   if (!layers || !layers.length) {
     box.innerHTML = '<div class="panel muted">No composition running. Turn it on above.</div>';
   }
+}
+
+/**
+ * What a layer shows: the cameras, each RTMP source, the USB camera, the screen and the test image,
+ * with the reason next to what cannot be chosen now, and why the test image stands in when it does.
+ */
+function buildLayerSourceRow(l) {
+  var wrap = document.createElement("div");
+  wrap.style.marginTop = "6px";
+  var row = document.createElement("div");
+  row.className = "row seg";
+  var reasons = [];
+  var asks = false;
+  (l.sourceOptions || []).forEach(function (o) {
+    var b = document.createElement("button");
+    var ask = o.available && o.phoneAction;
+    if (ask) asks = true;
+    b.textContent = o.label + (o.detail ? " · " + o.detail : "") + (ask ? " ⚑" : "");
+    if (o.active) b.className = "on";
+    b.disabled = !o.available;
+    b.title = o.reason || o.phoneAction || "";
+    b.onclick = function () { chooseLayerSource(l, o); };
+    row.appendChild(b);
+    if (!o.available && o.reason) reasons.push(o.label + ": " + o.reason);
+  });
+  wrap.appendChild(row);
+  var notes = [];
+  if (l.placeholderReason) notes.push("Showing the test image: " + l.placeholderReason + ".");
+  if (asks) notes.push("⚑ asks for a permission on the phone first.");
+  if (reasons.length) notes.push(reasons.join(" · "));
+  if (notes.length) {
+    var note = document.createElement("div");
+    note.className = "muted";
+    note.style.marginTop = "4px";
+    note.textContent = notes.join(" ");
+    wrap.appendChild(note);
+  }
+  return wrap;
+}
+
+function chooseLayerSource(l, o) {
+  if (o.active && !l.placeholderReason) return;
+  var go = function () { api("/api/layer/source", { layerId: l.id, source: o.key }); };
+  if (!state || !state.streaming) { go(); return; }
+  confirmDialog("Switch this layer's source?",
+    "The layer goes blank for a moment while it switches; the rest of the picture keeps going" +
+    (o.phoneAction ? ". First: " + o.phoneAction.toLowerCase() : "") + ".",
+    "Switch", false).then(function (yes) { if (yes) go(); });
 }
 
 var CAM_GROUPS = { zoom: "Zoom", exposure: "Exposure", focus: "Focus", wb: "White balance",

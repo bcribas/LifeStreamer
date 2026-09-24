@@ -131,8 +131,8 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                     ?.videoInput?.sourceFlow?.value
             },
             videoSourceSwitcher = { factory -> switchVideoSource(factory) },
-            rtmpPipConfig = {
-                val url = storageRepository.rtmpSourceUrlFlow(1).first()
+            rtmpConfig = { index ->
+                val url = storageRepository.rtmpSourceUrlFlow(index).first()
                 if (url.isBlank()) null
                 else url to storageRepository.rtmpSourceBufferForPlaybackMsFlow.first()
             }

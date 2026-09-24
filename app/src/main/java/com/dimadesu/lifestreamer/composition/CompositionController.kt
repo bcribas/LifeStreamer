@@ -20,7 +20,11 @@ import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.os.Looper
 import android.util.Log
+import android.util.Size
 import android.util.SizeF
+import androidx.media3.exoplayer.ExoPlayer
+import com.dimadesu.lifestreamer.rtmp.video.RTMPVideoSource
+import com.dimadesu.lifestreamer.sources.SourceChoice
 import io.github.thibaultbee.streampack.core.elements.processing.video.composition.CompositionLayout
 import io.github.thibaultbee.streampack.core.elements.processing.video.composition.CompositionPresets
 import io.github.thibaultbee.streampack.core.elements.processing.video.composition.LayerRect
@@ -80,8 +84,8 @@ class CompositionController(
      * what lets a composition be turned on and off without the app's screen.
      */
     private val videoSourceSwitcher: (suspend (IVideoSourceInternal.Factory) -> Unit)? = null,
-    /** URL and buffer of the RTMP source used for the second layer, or null when unset. */
-    rtmpPipConfig: suspend () -> Pair<String, Int>? = { null }
+    /** URL and playback buffer of RTMP source N (1-based), or null when it has no URL. */
+    private val rtmpConfig: suspend (Int) -> Pair<String, Int>? = { null }
 ) {
     /**
      * The one thread every mutation and every camera read runs on.
@@ -109,56 +113,49 @@ class CompositionController(
     private val capabilities = CompositionCapabilities(context)
     private val store = CompositionStore(context)
 
-    private val sources = CompositionSources(
-        context.applicationContext as android.app.Application, capabilities, rtmpPipConfig
+    private val sources = CompositionSources(context.applicationContext as android.app.Application)
+
+    private val saved = store.load()
+
+    /**
+     * What each layer is meant to show, by layer id: persisted, and applied live when it changes.
+     * A layer showing the test image because its source is missing keeps its choice here, with
+     * the reason in [placeholders].
+     */
+    private val _layerChoices = MutableStateFlow(
+        saved?.sources.orEmpty()
+            .mapNotNull { (id, key) -> SourceChoice.parse(key)?.let { id to it } }
+            .toMap()
     )
+    val layerChoices: StateFlow<Map<String, SourceChoice>> = _layerChoices.asStateFlow()
+
+    /** Schema 2 saved only the second layer's source, as a kind: read when there is nothing newer. */
+    private val legacyPipKind: String? = saved?.pipSourceName?.takeIf { saved.sources.isEmpty() }
+
+    private val _placeholders = MutableStateFlow<Map<String, String>>(emptyMap())
 
     /**
-     * What the second layer is meant to show. Persisted, and applied live when it changes.
-     *
-     * It used to be a LiveData in the ViewModel that nothing observed: choosing a new source with
-     * the composition running changed the chip's label and nothing else, until the composition was
-     * switched off and on again.
+     * The layers showing the test image in place of their source, and why: it could not be built
+     * (a permission to accept on the phone, no URL), or it died (an RTMP feed that stopped, a USB
+     * camera unplugged). Stops a failure from replacing a placeholder with another placeholder.
      */
-    private val _pipSource = MutableStateFlow(
-        store.load()?.pipSourceName
-            ?.let { runCatching { PipSourceKind.valueOf(it) }.getOrNull() }
-            ?: PipSourceKind.TEST_IMAGE
-    )
-    val pipSource: StateFlow<PipSourceKind> = _pipSource.asStateFlow()
+    val placeholders: StateFlow<Map<String, String>> = _placeholders.asStateFlow()
 
-    /**
-     * True while the second layer shows the placeholder because its real source could not be built
-     * or died. Stops a failure from replacing a placeholder with another placeholder.
-     */
+    fun placeholderReason(layerId: String): String? = _placeholders.value[layerId]
+
+    /** The layer meant to show [choice], if any. */
+    fun layerWith(choice: SourceChoice): String? =
+        _layerChoices.value.entries.firstOrNull { it.value == choice }?.key
+
+    /** The feeds of the RTMP layers, which own their players. */
+    private val feeds = java.util.concurrent.ConcurrentHashMap<String, RtmpLayerFeed>()
+
+    /** Camera layers opened at the size two cameras can share. */
+    private val cappedLayers = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** Registered by the app's screen while it is alive; builds the sources only it can build. */
     @Volatile
-    var isPipOnPlaceholder: Boolean = true
-        private set
-
-    /**
-     * The player of an RTMP second layer. A source never releases its player, so it is released
-     * here when the layer takes another source or the composition goes away; before, every switch
-     * left one decoding in the background.
-     */
-    private var pipPlayer: androidx.media3.exoplayer.ExoPlayer? = null
-
-    private fun keepPipPlayer(player: androidx.media3.exoplayer.ExoPlayer?) {
-        val previous = pipPlayer
-        pipPlayer = player
-        if (previous != null && previous !== player) {
-            android.os.Handler(Looper.getMainLooper()).post {
-                runCatching {
-                    previous.stop()
-                    previous.release()
-                }.onFailure { Log.w(TAG, "Could not release an RTMP layer player: ${it.message}") }
-                Log.i(TAG, "Released the second layer's RTMP player")
-            }
-        }
-    }
-
-    /** Registered by the ViewModel while it is alive; builds the sources only the app can build. */
-    @Volatile
-    var externalPipProvider: ExternalPipSourceProvider? = null
+    var externalSources: ExternalLayerSources? = null
 
     /** Structural changes (on/off, source swaps) are serialised: two at once would fight over cameras. */
     private val structuralMutex = kotlinx.coroutines.sync.Mutex()
@@ -174,6 +171,11 @@ class CompositionController(
      * nothing.
      */
     val messages: SharedFlow<String> = _messages.asSharedFlow()
+
+    /** Tells the operator [message], on the phone and the page. */
+    fun tell(message: String) {
+        _messages.tryEmit(message)
+    }
 
     private val _layersInvalidated = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
 
@@ -286,6 +288,7 @@ class CompositionController(
 
     fun setPrimaryLayer(layerId: String) = confined {
         composite?.setPrimaryLayer(layerId)
+        applyFeedAudio()
         scheduleSave()
     }
 
@@ -309,60 +312,188 @@ class CompositionController(
 
     // region structural — opens devices, can fail
 
+    /** Points one layer at a different camera, keeping its rectangle and depth. */
+    suspend fun setLayerCamera(layerId: String, cameraId: String): Result<Unit> =
+        setLayerSource(layerId, SourceChoice.Camera(cameraId))
+
     /**
-     * Points one layer at a different camera, keeping its rectangle and depth.
+     * Makes [layerId] show [choice], keeping where it is, its size and its style. A source that
+     * cannot be built right now (a USB camera or the screen waiting for a permission, an RTMP
+     * source without a URL) leaves the test image in its place, saying why.
      *
-     * Refuses a pairing the hardware cannot honour *before* trying, because letting camera2 fail
-     * to open leaves the composition half-built in the middle of a live stream.
+     * Refuses what the hardware cannot do *before* trying -- two cameras that cannot run
+     * together, one source in two layers -- because letting camera2 fail to open leaves the
+     * composition half-built in the middle of a live stream.
      */
-    suspend fun setLayerCamera(layerId: String, cameraId: String): Result<Unit> {
-        val target = composite ?: return Result.failure(IllegalStateException("No composition"))
-        val currentLayout = target.layoutFlow.value
-        val layer = currentLayout[layerId]
-            ?: return Result.failure(IllegalArgumentException("No layer $layerId"))
-
-        val usedElsewhere = currentLayout.layers
-            .filter { it.id != layerId }
-            .mapNotNull { (target.childSource(it.id) as? ICameraSource)?.cameraId }
-
-        if (usedElsewhere.contains(cameraId)) {
-            val message = "That camera is already used by another layer"
+    suspend fun setLayerSource(layerId: String, choice: SourceChoice): Result<Unit> = structural {
+        val target = composite ?: error("No composition")
+        val layer = target.layoutFlow.value[layerId]
+            ?: throw IllegalArgumentException("No layer $layerId")
+        refusal(layerId, choice)?.let { message ->
             _messages.tryEmit(message)
-            return Result.failure(IllegalStateException(message))
+            Log.w(TAG, "Refused $choice for layer $layerId: $message")
+            throw IllegalStateException(message)
         }
+        if (_layerChoices.value[layerId] == choice && layerId !in _placeholders.value) return@structural
+        apply(target, layerId, layer, choice)
+        _messages.tryEmit("${choiceLabel(choice)} -> ${positionName(layerId)}")
+        Log.i(TAG, "Layer $layerId now shows $choice" +
+                (placeholderReason(layerId)?.let { " (placeholder: $it)" } ?: ""))
+    }
 
-        usedElsewhere.firstOrNull { !capabilities.canRunTogether(cameraId, it) }?.let { clash ->
-            val message = "${displayName(cameraId)} cannot run at the same time as " +
-                    "${displayName(clash)} on this device"
-            _messages.tryEmit(message)
-            Log.w(TAG, "Refused camera $cameraId: clashes with $clash")
-            return Result.failure(IllegalStateException(message))
+    /** Why [choice] cannot go in [layerId] next to what the other layers show, or null. */
+    private fun refusal(layerId: String, choice: SourceChoice): String? {
+        if (choice == SourceChoice.TestImage) return null
+        val others = _layerChoices.value.filterKeys { it != layerId && composite?.layoutFlow?.value?.get(it) != null }
+        if (choice in others.values) return "${choiceLabel(choice)} is already in another layer"
+        if (choice is SourceChoice.Camera) {
+            others.values.filterIsInstance<SourceChoice.Camera>()
+                .firstOrNull { !capabilities.canRunTogether(choice.id, it.id) }
+                ?.let {
+                    return "${displayName(choice.id)} cannot run at the same time as " +
+                            "${displayName(it.id)} on this device"
+                }
         }
+        return null
+    }
 
-        // Both cameras of a concurrent pair must stay inside the guaranteed configuration.
-        val captureResolution = if (usedElsewhere.isNotEmpty()) {
-            capabilities.report().concurrentCameraMaxSize
-        } else {
-            null
+    /** Builds [choice] into [layer] and puts it in. Under the structural lock. */
+    private suspend fun apply(
+        target: ICompositeVideoSource,
+        layerId: String,
+        layer: VideoLayer,
+        choice: SourceChoice
+    ) {
+        val cap = if (choice is SourceChoice.Camera) capForCameraIn(target, layerId) else null
+        val feed = (choice as? SourceChoice.Rtmp)?.let { newFeed(layerId, it.index) }
+        val build = sources.layerSpec(choice, layer, externalSources, cap) { feed?.open() }
+        val previousFeed = feeds.remove(layerId)
+        target.replaceLayerSource(layerId, build.spec)
+        // Only now: the old source let go of its player when it was replaced
+        previousFeed?.release()
+        if (feed != null) {
+            if (build.placeholderReason == null) feeds[layerId] = feed else feed.release()
         }
+        if (cap != null) cappedLayers.add(layerId) else cappedLayers.remove(layerId)
+        _layerChoices.value = _layerChoices.value + (layerId to choice)
+        setPlaceholder(layerId, build.placeholderReason)
+        build.placeholderReason?.let { _messages.tryEmit(it) }
+        applyFeedAudio()
+        scheduleSave()
+        // The layout is unchanged by design (the rectangle survives a source swap), so the
+        // layoutFlow will not emit. Everything derived from the live source -- the label on the
+        // bar, the chip on the page, the camera controls -- needs this to be told.
+        sourcesChanged()
+        _layersInvalidated.tryEmit(Unit)
+    }
 
-        return runCatching {
+    /**
+     * The capture size for a camera going into [layerId]: capped when another layer shows a
+     * camera, and that one is reopened capped too if it was not -- both cameras of a pair must
+     * stay inside the guaranteed configuration, or the second one fails to open.
+     */
+    private suspend fun capForCameraIn(target: ICompositeVideoSource, layerId: String): Size? {
+        val otherCameras = _layerChoices.value.filter { (id, choice) ->
+            id != layerId && choice is SourceChoice.Camera && id !in _placeholders.value &&
+                    target.layoutFlow.value[id] != null
+        }
+        if (otherCameras.isEmpty()) return null
+        val cap = capabilities.report().concurrentCameraMaxSize
+        otherCameras.forEach { (id, choice) ->
+            if (id in cappedLayers) return@forEach
+            val layer = target.layoutFlow.value[id] ?: return@forEach
             target.replaceLayerSource(
-                layerId,
-                LayerSpec(
-                    layer = layer,
-                    childFactory = CameraSourceFactory(cameraId),
-                    captureResolution = captureResolution
-                )
+                id, LayerSpec(layer, CameraSourceFactory((choice as SourceChoice.Camera).id), cap)
             )
-            _messages.tryEmit("${displayName(cameraId)} -> ${positionName(layerId)}")
-            Log.i(TAG, "Layer $layerId now uses camera $cameraId")
-            // The layout is unchanged by design (the rectangle survives a camera swap), so the
-            // layoutFlow will not emit. Everything derived from the live source -- the label on
-            // the bar, the chip on the page, the camera controls -- needs this to be told.
+            cappedLayers.add(id)
+            Log.i(TAG, "Layer $id reopened at ${cap.width}x${cap.height} to pair with another camera")
+        }
+        return cap
+    }
+
+    private fun newFeed(layerId: String, index: Int): RtmpLayerFeed {
+        lateinit var feed: RtmpLayerFeed
+        feed = RtmpLayerFeed(
+            application = context.applicationContext as android.app.Application,
+            scope = scope,
+            index = index,
+            config = rtmpConfig,
+            onDown = { reason -> degradeLayerToPlaceholder(layerId, reason) },
+            onUp = { player -> restoreFeed(layerId, feed, player) },
+        )
+        return feed
+    }
+
+    /** An RTMP layer's feed plays again: its player goes back in, unless the layer moved on. */
+    private suspend fun restoreFeed(layerId: String, feed: RtmpLayerFeed, player: ExoPlayer) {
+        structural {
+            val target = composite
+            val layer = target?.layoutFlow?.value?.get(layerId)
+            if (target == null || layer == null || feeds[layerId] !== feed) {
+                feed.release()
+                return@structural
+            }
+            target.replaceLayerSource(layerId, LayerSpec(layer, RTMPVideoSource.Factory(player)))
+            setPlaceholder(layerId, null)
+            applyFeedAudio()
+            _messages.tryEmit("RTMP ${feed.index} is back")
             sourcesChanged()
             _layersInvalidated.tryEmit(Unit)
         }
+    }
+
+    /**
+     * Puts a source that arrives later -- a USB camera done opening, a screen-capture grant --
+     * in the layer meant to show it.
+     */
+    suspend fun attachDeferredSource(
+        choice: SourceChoice,
+        factory: IVideoSourceInternal.Factory
+    ): Result<Unit> = structural {
+        val target = composite ?: return@structural
+        val layerId = layerWith(choice) ?: return@structural
+        val layer = target.layoutFlow.value[layerId] ?: return@structural
+        target.replaceLayerSource(layerId, LayerSpec(layer, factory))
+        setPlaceholder(layerId, null)
+        sourcesChanged()
+        _layersInvalidated.tryEmit(Unit)
+        Log.i(TAG, "Layer $layerId now shows $choice")
+    }
+
+    /**
+     * Falls back to the test image in [layerId], keeping the stream going. [reason] is told to
+     * the operator, and shown until the source is back.
+     */
+    suspend fun degradeLayerToPlaceholder(layerId: String, reason: String): Result<Unit> = structural {
+        val target = composite ?: return@structural
+        val layer = target.layoutFlow.value[layerId] ?: return@structural
+        if (layerId in _placeholders.value) return@structural
+        if (_layerChoices.value[layerId] == SourceChoice.TestImage) return@structural
+        target.replaceLayerSource(layerId, sources.placeholderSpec(layer))
+        cappedLayers.remove(layerId)
+        setPlaceholder(layerId, reason)
+        _messages.tryEmit(reason)
+        sourcesChanged()
+        _layersInvalidated.tryEmit(Unit)
+        Log.i(TAG, "Layer $layerId degraded to the placeholder: $reason")
+    }
+
+    /** The same for the layer showing [choice], from a place that cannot wait. */
+    fun degradeLater(choice: SourceChoice, reason: String) {
+        val layerId = layerWith(choice) ?: return
+        scope.launch { degradeLayerToPlaceholder(layerId, reason) }
+    }
+
+    private fun setPlaceholder(layerId: String, reason: String?) {
+        _placeholders.value =
+            if (reason == null) _placeholders.value - layerId
+            else _placeholders.value + (layerId to reason)
+    }
+
+    /** Only the 🔊 layer's RTMP feed keeps its sound; see [RtmpLayerFeed.setAudioEnabled]. */
+    private fun applyFeedAudio() {
+        val primary = layout?.primaryLayer?.id
+        feeds.forEach { (id, feed) -> feed.setAudioEnabled(id == primary) }
     }
 
     // endregion
@@ -384,116 +515,141 @@ class CompositionController(
             ?: "0"
 
     /**
-     * Turns the composition on: main camera plus the chosen second layer.
+     * Turns the composition on. The bottom layer shows what is on screen now ([onScreen], else
+     * the camera); the other one what it showed last time, unless that cannot run next to it --
+     * then another camera, or the test image.
      *
      * Moved here from PreviewViewModel.toggleCompositeSource so the service -- and so the remote
      * control -- can do it with the app's screen gone. Switching the video source while streaming
      * does not reconnect: the encoder is kept and the picture freezes briefly.
      */
-    suspend fun enableComposition(): Result<Unit> = structural {
+    suspend fun enableComposition(onScreen: SourceChoice? = null): Result<Unit> = structural {
         val switcher = videoSourceSwitcher ?: error("Cannot switch the video source from here")
         if (composite != null) return@structural
-        val cameraId = primaryCameraId()
-        val kind = _pipSource.value
-        val pip = sources.pipSpec(kind, cameraId, externalPipProvider)
-        switcher(
-            CompositeVideoSourceFactory(
-                listOf(sources.mainSpec(cameraId, pairedWithCamera = kind == PipSourceKind.CAMERA && !pip.isPlaceholder), pip.spec)
-            )
-        )
-        isPipOnPlaceholder = pip.isPlaceholder
-        keepPipPlayer(pip.player)
+        val bottom = onScreen ?: SourceChoice.Camera(primaryCameraId())
+        val (bottomId, otherId) = upcomingLayers()
+        val choices = mapOf(bottomId to bottom, otherId to compatible(remembered(otherId, bottom), bottom))
+        val cap = if (choices.values.all { it is SourceChoice.Camera }) {
+            capabilities.report().concurrentCameraMaxSize
+        } else {
+            null
+        }
+
+        val newFeeds = mutableMapOf<String, RtmpLayerFeed>()
+        val builds = choices.mapValues { (id, choice) ->
+            val feed = (choice as? SourceChoice.Rtmp)?.let { newFeed(id, it.index) }
+            sources.layerSpec(
+                choice, sources.defaultLayer(id), externalSources,
+                cap.takeIf { choice is SourceChoice.Camera }
+            ) { feed?.open() }.also { build ->
+                if (feed != null) {
+                    if (build.placeholderReason == null) newFeeds[id] = feed else feed.release()
+                }
+            }
+        }
+        try {
+            switcher(CompositeVideoSourceFactory(builds.values.map { it.spec }))
+        } catch (t: Throwable) {
+            newFeeds.values.forEach { it.release() }
+            throw t
+        }
+        feeds.values.forEach { it.release() }
+        feeds.clear()
+        feeds.putAll(newFeeds)
+        cappedLayers.clear()
+        if (cap != null) cappedLayers.addAll(choices.keys)
+        _layerChoices.value = choices
+        _placeholders.value = builds.mapNotNull { (id, build) -> build.placeholderReason?.let { id to it } }.toMap()
         composite?.let { onCompositionAppeared(it) }
         restoreSaved()
+        applyFeedAudio()
+        scheduleSave()
         sourcesChanged()
-        pip.note?.let { _messages.tryEmit(it) }
-        Log.i(TAG, "Composition on: camera $cameraId + ${kind.label}")
+        _placeholders.value.values.distinct().forEach { _messages.tryEmit(it) }
+        Log.i(TAG, "Composition on: $choices")
     }
 
-    /** Turns the composition off, back to the camera the main layer was showing. */
-    suspend fun disableComposition(): Result<Unit> = structural {
+    /**
+     * The layer at the bottom and the other one, the next time the composition is turned on:
+     * they come back where the operator left them, a swap included.
+     */
+    fun upcomingLayers(): Pair<String, String> {
+        val depths = store.load()?.depths.orEmpty()
+        return if ((depths[CompositionLayers.PIP] ?: 1) < (depths[CompositionLayers.MAIN] ?: 0)) {
+            CompositionLayers.PIP to CompositionLayers.MAIN
+        } else {
+            CompositionLayers.MAIN to CompositionLayers.PIP
+        }
+    }
+
+    /** What [layerId] will show when the composition is turned on; checked by the caller. */
+    fun presetLayerSource(layerId: String, choice: SourceChoice) {
+        _layerChoices.value = _layerChoices.value + (layerId to choice)
+        val choices = _layerChoices.value
+        store.saveSources(choices.mapValues { it.value.key }, SourceChoice.legacyKind(choices[CompositionLayers.PIP]))
+        _messages.tryEmit("${choiceLabel(choice)} in the ${if (layerId == upcomingLayers().first) "main" else "inset"} layer when the composition is on")
+    }
+
+    /** What [layerId] showed last time; an old "second camera" is the one that pairs with [onScreen]. */
+    private fun remembered(layerId: String, onScreen: SourceChoice): SourceChoice =
+        _layerChoices.value[layerId]
+            ?: legacyPipKind?.takeIf { layerId == CompositionLayers.PIP }?.let { kind ->
+                SourceChoice.fromLegacyKind(kind) {
+                    (onScreen as? SourceChoice.Camera)?.let { capabilities.secondCameraFor(it.id) }
+                }
+            }
+            ?: SourceChoice.TestImage
+
+    /** [wanted], or what can stand next to [onScreen] instead: another camera, or the test image. */
+    private fun compatible(wanted: SourceChoice, onScreen: SourceChoice): SourceChoice {
+        val bothCameras = wanted is SourceChoice.Camera && onScreen is SourceChoice.Camera
+        val clash = wanted == onScreen ||
+                (bothCameras && !capabilities.canRunTogether((wanted as SourceChoice.Camera).id, (onScreen as SourceChoice.Camera).id))
+        if (!clash) return wanted
+        if (onScreen is SourceChoice.Camera && wanted is SourceChoice.Camera) {
+            return capabilities.secondCameraFor(onScreen.id)?.let { SourceChoice.Camera(it) }
+                ?: SourceChoice.TestImage
+        }
+        return SourceChoice.TestImage
+    }
+
+    /**
+     * Turns the composition off, back to a camera: the bottom layer's when it shows one, else the
+     * last camera picked. Returns what the bottom layer showed when it was something else, for
+     * the caller to carry on with: an RTMP source, USB or the screen as the whole picture need
+     * the app's screen.
+     */
+    suspend fun disableComposition(): Result<SourceChoice?> = structural {
         val switcher = videoSourceSwitcher ?: error("Cannot switch the video source from here")
-        val target = composite ?: return@structural
-        val cameraId = (target.childSource(CompositionLayers.MAIN) as? ICameraSource)?.cameraId
+        val target = composite ?: return@structural null
+        val bottomId = target.layoutFlow.value.layers.minByOrNull { it.z }?.id
+        val bottom = bottomId?.let { _layerChoices.value[it] }
+        val cameraId = (bottom as? SourceChoice.Camera)?.id
+            ?: primaryCameraHint
+            ?: _layerChoices.value.values.filterIsInstance<SourceChoice.Camera>().firstOrNull()?.id
             ?: primaryCameraId()
+        saveJob?.cancel()
+        saveNow()
         stopObservingFailures()
         switcher(CameraSourceFactory(cameraId))
-        keepPipPlayer(null)
+        feeds.values.forEach { it.release() }
+        feeds.clear()
+        cappedLayers.clear()
+        _placeholders.value = emptyMap()
         sourcesChanged()
         Log.i(TAG, "Composition off, back to camera $cameraId")
+        bottom?.takeUnless { it is SourceChoice.Camera || it == SourceChoice.TestImage }
     }
-
-    /**
-     * Chooses what the second layer shows, and applies it at once if a composition is running.
-     */
-    suspend fun setPipSource(kind: PipSourceKind): Result<Unit> = structural {
-        _pipSource.value = kind
-        scheduleSave()
-        val target = composite ?: return@structural
-        // The layer as it is now: a new source keeps where it was put, its size and its style
-        val pip = sources.pipSpec(kind, primaryCameraId(), externalPipProvider, currentPipLayer(target))
-        target.replaceLayerSource(CompositionLayers.PIP, pip.spec)
-        keepPipPlayer(pip.player)
-        isPipOnPlaceholder = pip.isPlaceholder
-        pip.note?.let { _messages.tryEmit(it) }
-        sourcesChanged()
-        _layersInvalidated.tryEmit(Unit)
-        Log.i(TAG, "Second layer is now ${kind.label}${if (pip.isPlaceholder) " (placeholder)" else ""}")
-    }
-
-    /**
-     * Puts an app-built source in the second layer, for sources whose readiness arrives later by
-     * callback -- a USB camera that finishes opening after the composition was built.
-     */
-    suspend fun replacePipSource(factory: IVideoSourceInternal.Factory): Result<Unit> = structural {
-        val target = composite ?: return@structural
-        target.replaceLayerSource(CompositionLayers.PIP, LayerSpec(currentPipLayer(target), factory))
-        keepPipPlayer(null)
-        isPipOnPlaceholder = false
-        sourcesChanged()
-        _layersInvalidated.tryEmit(Unit)
-    }
-
-    /** Falls back to the test image, keeping the stream going. [reason] is told to the operator. */
-    suspend fun degradePipToPlaceholder(reason: String): Result<Unit> = structural {
-        val target = composite ?: return@structural
-        if (isPipOnPlaceholder) return@structural
-        target.replaceLayerSource(CompositionLayers.PIP, sources.placeholderSpec(currentPipLayer(target)))
-        keepPipPlayer(null)
-        isPipOnPlaceholder = true
-        _messages.tryEmit(reason)
-        sourcesChanged()
-        _layersInvalidated.tryEmit(Unit)
-        Log.i(TAG, "Second layer degraded to the placeholder: $reason")
-    }
-
-    /** The second layer where it is now, or where a new one goes. */
-    private fun currentPipLayer(target: ICompositeVideoSource) =
-        target.layoutFlow.value[CompositionLayers.PIP] ?: sources.pipLayer()
 
     /** Whether two cameras can run at the same time on this phone. */
     fun canRunTogether(a: String, b: String): Boolean = capabilities.canRunTogether(a, b)
-
-    /** One row per kind, with why it cannot be used right now, for the page and the app's picker. */
-    data class PipSourceOption(val kind: PipSourceKind, val available: Boolean, val reason: String?)
-
-    fun pipSourceOptions(): List<PipSourceOption> = PipSourceKind.entries.map { kind ->
-        val reason = when (kind) {
-            PipSourceKind.TEST_IMAGE, PipSourceKind.RTMP -> null
-            PipSourceKind.CAMERA -> capabilities.reasonSecondCameraUnavailable(primaryCameraId())
-            PipSourceKind.SCREEN, PipSourceKind.USB ->
-                externalPipProvider?.reasonUnavailable(kind)
-                    ?: if (externalPipProvider == null) CompositionSources.OPEN_APP_REASON else null
-        }
-        PipSourceOption(kind, reason == null, reason)
-    }
 
     /**
      * Wires failure handling to a composition, whoever created it -- the app, the page, or a
      * restored session. Idempotent per instance.
      *
-     * This used to live in the ViewModel and died with it, so with the app's screen gone a second
-     * layer whose source failed (an RTMP feed that stopped, say) simply went black.
+     * This used to live in the ViewModel and died with it, so with the app's screen gone a layer
+     * whose source failed (an RTMP feed that stopped, say) simply went black.
      */
     fun onCompositionAppeared(target: ICompositeVideoSource) {
         if (observedComposite === target && failureJob?.isActive == true) return
@@ -502,8 +658,13 @@ class CompositionController(
         failureJob = scope.launch {
             target.layerFailureFlow.collect { failure ->
                 Log.w(TAG, "Layer ${failure.layerId} failed: ${failure.reason}")
-                if (failure.layerId == CompositionLayers.PIP) {
-                    degradePipToPlaceholder("${_pipSource.value.label} lost - showing placeholder")
+                // An RTMP layer is tried again by its feed; the rest wait for the operator
+                val feed = feeds[failure.layerId]
+                if (feed != null) {
+                    feed.reportTrouble(failure.reason)
+                } else {
+                    val name = _layerChoices.value[failure.layerId]?.let(::choiceLabel) ?: "The layer's source"
+                    degradeLayerToPlaceholder(failure.layerId, "$name lost - showing placeholder")
                 }
             }
         }
@@ -515,7 +676,7 @@ class CompositionController(
         observedComposite = null
     }
 
-    private suspend fun structural(block: suspend () -> Unit): Result<Unit> =
+    private suspend fun <T> structural(block: suspend () -> T): Result<T> =
         structuralMutex.withLock { runCatching { block() } }
             .onFailure { Log.w(TAG, "Composition change failed: ${it.message}", it) }
 
@@ -564,21 +725,24 @@ class CompositionController(
     fun displayName(cameraId: String): String =
         _cameras.value.firstOrNull { it.id == cameraId }?.displayName ?: cameraId
 
+    fun choiceLabel(choice: SourceChoice): String = when (choice) {
+        is SourceChoice.Camera -> displayName(choice.id)
+        is SourceChoice.Rtmp -> "RTMP ${choice.index}"
+        SourceChoice.Usb -> "USB camera"
+        SourceChoice.Screen -> "Screen"
+        SourceChoice.TestImage -> "Test image"
+    }
+
     /**
-     * What a layer is called. A camera layer is named after its camera, because with two of them
-     * on screen "Camera" and "Second camera" say nothing about which is which.
+     * What a layer is called: after what it shows, because with two cameras on screen "Camera"
+     * and "Second camera" say nothing about which is which.
      */
     fun layerLabel(layerId: String): String {
-        val cameraId = (composite?.childSource(layerId) as? ICameraSource)?.cameraId
-        if (cameraId != null) return displayName(cameraId)
-        return when (layerId) {
-            CompositionLayers.MAIN -> "Camera"
-            // Says what is really on screen: a source that could not be built, or died, shows the
-            // test image, and the label must not keep naming the source that is not there.
-            CompositionLayers.PIP ->
-                if (isPipOnPlaceholder) PipSourceKind.TEST_IMAGE.label else _pipSource.value.label
-            else -> layerId
-        }
+        val choice = _layerChoices.value[layerId]
+            ?: (composite?.childSource(layerId) as? ICameraSource)?.cameraId?.let { SourceChoice.Camera(it) }
+            ?: return if (layerId == CompositionLayers.MAIN) "Camera" else layerId
+        // Says what is really on screen: the test image stands in for a source that is not there
+        return if (layerId in _placeholders.value) "${choiceLabel(choice)} (waiting)" else choiceLabel(choice)
     }
 
     /**
@@ -647,12 +811,18 @@ class CompositionController(
         saveJob?.cancel()
         saveJob = scope.launch {
             kotlinx.coroutines.delay(SAVE_DEBOUNCE_MS)
-            val current = layout ?: return@launch
-            // The source kind used to come from a field nobody ever assigned, so every save made
-            // here -- a drag, a preset, a swap, from the phone or the page -- wrote an empty name
-            // over the one the ViewModel had saved.
-            store.save(pipSourceName = _pipSource.value.name, layout = current)
+            saveNow()
         }
+    }
+
+    private fun saveNow() {
+        val current = layout ?: return
+        val choices = _layerChoices.value
+        store.save(
+            layout = current,
+            sources = choices.mapValues { it.value.key },
+            pipSourceName = SourceChoice.legacyKind(choices[CompositionLayers.PIP])
+        )
     }
 
     /**
@@ -666,6 +836,10 @@ class CompositionController(
         var changed = false
 
         current.layers.forEach { layer ->
+            saved.depths[layer.id]?.let { z ->
+                current = current.mapLayer(layer.id) { it.copy(z = z) }
+                changed = true
+            }
             saved.rects[layer.id]?.let { rect ->
                 current = current.mapLayer(layer.id) {
                     it.copy(rect = rect, visible = !saved.hidden.contains(layer.id))
@@ -686,6 +860,11 @@ class CompositionController(
         }
         saved.backgroundColor?.let {
             current = current.copy(backgroundColor = it)
+            changed = true
+        }
+        // The 🔊 layer: it sets the pace of the frames, and the live's sound comes from it
+        saved.primary?.takeIf { current[it] != null && it != current.primaryLayerId }?.let {
+            current = current.copy(primaryLayerId = it)
             changed = true
         }
 

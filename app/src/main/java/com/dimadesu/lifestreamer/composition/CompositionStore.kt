@@ -27,7 +27,7 @@ import io.github.thibaultbee.streampack.core.elements.processing.video.compositi
 /**
  * Remembers the layout the operator arranged, so reopening the app does not throw it away.
  *
- * Only geometry and the chosen source kind are stored — never live objects such as an
+ * Only geometry and the chosen sources are stored — never live objects such as an
  * ExoPlayer or a MediaProjection token, which are meaningless across a restart.
  */
 class CompositionStore(context: Context) {
@@ -55,21 +55,28 @@ class CompositionStore(context: Context) {
         val scale: String? = null,
         val alpha: Float? = null,
         val mirror: Boolean? = null,
-        val rot: Int? = null
+        val rot: Int? = null,
+        /** Schema 3: the depth, which a swap changes; without it a swapped layout came back upside down. */
+        val z: Int? = null
     )
 
+    /**
+     * [pipSource] is the second layer's source as schema 2 named it, still written so an older
+     * app reads something sensible back. Schema 3 adds [sources] (layer id to a source key, see
+     * [com.dimadesu.lifestreamer.sources.SourceChoice]) and [primary], the 🔊 layer.
+     */
     @Keep
     internal data class CompositionDto(
         val v: Int = SCHEMA_VERSION,
         val pipSource: String,
         val layers: List<LayerDto>,
-        val bg: Int? = null
+        val bg: Int? = null,
+        val sources: Map<String, String>? = null,
+        val primary: String? = null
     )
 
     private val prefs: SharedPreferences =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-
-    private val gson = Gson()
 
     /** A layer's look, independent of where it sits. Null fields mean "keep what it had". */
     data class LayerStyle(
@@ -80,32 +87,34 @@ class CompositionStore(context: Context) {
     )
 
     data class SavedComposition(
+        /** Schema 2's name for the second layer's source; see [sources] first. */
         val pipSourceName: String,
         val rects: Map<String, LayerRect>,
         val hidden: Set<String>,
         val styles: Map<String, LayerStyle> = emptyMap(),
-        val backgroundColor: Int? = null
+        val backgroundColor: Int? = null,
+        /** Each layer's source key; empty when saved by schema 2. */
+        val sources: Map<String, String> = emptyMap(),
+        val primary: String? = null,
+        val depths: Map<String, Int> = emptyMap()
     )
 
-    fun save(pipSourceName: String, layout: CompositionLayout) {
+    fun save(layout: CompositionLayout, sources: Map<String, String>, pipSourceName: String) {
         try {
-            val dto = CompositionDto(
-                pipSource = pipSourceName,
-                layers = layout.layers.map { layer ->
-                    val rect = layer.rect
-                    LayerDto(
-                        layer.id, rect.left, rect.top, rect.right, rect.bottom, layer.visible,
-                        scale = layer.scaleMode.name,
-                        alpha = layer.alpha,
-                        mirror = layer.mirror,
-                        rot = layer.rotationDegrees
-                    )
-                },
-                bg = layout.backgroundColor
-            )
-            prefs.edit().putString(KEY_COMPOSITION, gson.toJson(dto)).apply()
+            prefs.edit().putString(KEY_COMPOSITION, encode(layout, sources, pipSourceName)).apply()
         } catch (t: Throwable) {
             Log.w(TAG, "Could not save the composition: ${t.message}")
+        }
+    }
+
+    /** Keeps the layers' sources with no composition running: the layout stays as it was saved. */
+    fun saveSources(sources: Map<String, String>, pipSourceName: String) {
+        try {
+            prefs.edit()
+                .putString(KEY_COMPOSITION, withSources(prefs.getString(KEY_COMPOSITION, null), sources, pipSourceName))
+                .apply()
+        } catch (t: Throwable) {
+            Log.w(TAG, "Could not save the layers' sources: ${t.message}")
         }
     }
 
@@ -113,41 +122,76 @@ class CompositionStore(context: Context) {
      * Returns `null` on anything unexpected — a corrupt or newer blob must degrade to the
      * defaults, never crash the app on launch.
      */
-    fun load(): SavedComposition? {
-        val json = prefs.getString(KEY_COMPOSITION, null) ?: return null
-        return try {
-            val dto = gson.fromJson(json, CompositionDto::class.java) ?: return null
-            // Older schemas are a subset of this one, so they load; a newer one is not understood.
-            if (dto.v > SCHEMA_VERSION) {
-                Log.i(TAG, "Ignoring a composition saved with schema ${dto.v}")
-                return null
-            }
-            SavedComposition(
-                pipSourceName = dto.pipSource,
-                rects = dto.layers.associate { it.id to LayerRect(it.l, it.t, it.r, it.b) },
-                hidden = dto.layers.filterNot { it.visible }.map { it.id }.toSet(),
-                styles = dto.layers.associate {
-                    it.id to LayerStyle(
-                        scaleMode = it.scale?.let { name ->
-                            runCatching { LayerScaleMode.valueOf(name) }.getOrNull()
-                        },
-                        alpha = it.alpha,
-                        mirror = it.mirror,
-                        rotationDegrees = it.rot
-                    )
-                },
-                backgroundColor = dto.bg
-            )
-        } catch (t: Throwable) {
-            Log.w(TAG, "Ignoring an unreadable saved composition: ${t.message}")
-            null
-        }
-    }
+    fun load(): SavedComposition? = decode(prefs.getString(KEY_COMPOSITION, null))
 
     companion object {
         private const val TAG = "CompositionStore"
         private const val PREFS_NAME = "composition"
         private const val KEY_COMPOSITION = "last_composition"
-        private const val SCHEMA_VERSION = 2
+        private const val SCHEMA_VERSION = 3
+
+        private val gson = Gson()
+
+        internal fun encode(layout: CompositionLayout, sources: Map<String, String>, pipSourceName: String): String =
+            gson.toJson(
+                CompositionDto(
+                    pipSource = pipSourceName,
+                    layers = layout.layers.map { layer ->
+                        val rect = layer.rect
+                        LayerDto(
+                            layer.id, rect.left, rect.top, rect.right, rect.bottom, layer.visible,
+                            scale = layer.scaleMode.name,
+                            alpha = layer.alpha,
+                            mirror = layer.mirror,
+                            rot = layer.rotationDegrees,
+                            z = layer.z
+                        )
+                    },
+                    bg = layout.backgroundColor,
+                    sources = sources,
+                    primary = layout.primaryLayerId
+                )
+            )
+
+        internal fun withSources(json: String?, sources: Map<String, String>, pipSourceName: String): String {
+            val saved = json?.let { runCatching { gson.fromJson(it, CompositionDto::class.java) }.getOrNull() }
+                ?.takeIf { it.v <= SCHEMA_VERSION }
+            val base = saved ?: CompositionDto(pipSource = pipSourceName, layers = emptyList())
+            return gson.toJson(base.copy(v = SCHEMA_VERSION, pipSource = pipSourceName, sources = sources))
+        }
+
+        internal fun decode(json: String?): SavedComposition? {
+            json ?: return null
+            return try {
+                val dto = gson.fromJson(json, CompositionDto::class.java) ?: return null
+                // Older schemas are a subset of this one, so they load; a newer one is not understood.
+                if (dto.v > SCHEMA_VERSION) {
+                    Log.i(TAG, "Ignoring a composition saved with schema ${dto.v}")
+                    return null
+                }
+                SavedComposition(
+                    pipSourceName = dto.pipSource,
+                    rects = dto.layers.associate { it.id to LayerRect(it.l, it.t, it.r, it.b) },
+                    hidden = dto.layers.filterNot { it.visible }.map { it.id }.toSet(),
+                    styles = dto.layers.associate {
+                        it.id to LayerStyle(
+                            scaleMode = it.scale?.let { name ->
+                                runCatching { LayerScaleMode.valueOf(name) }.getOrNull()
+                            },
+                            alpha = it.alpha,
+                            mirror = it.mirror,
+                            rotationDegrees = it.rot
+                        )
+                    },
+                    backgroundColor = dto.bg,
+                    sources = dto.sources.orEmpty(),
+                    primary = dto.primary,
+                    depths = dto.layers.mapNotNull { layer -> layer.z?.let { layer.id to it } }.toMap()
+                )
+            } catch (t: Throwable) {
+                Log.w(TAG, "Ignoring an unreadable saved composition: ${t.message}")
+                null
+            }
+        }
     }
 }

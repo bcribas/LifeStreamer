@@ -19,9 +19,11 @@ import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Log
+import android.util.Size
+import androidx.media3.exoplayer.ExoPlayer
 import com.dimadesu.lifestreamer.R
 import com.dimadesu.lifestreamer.rtmp.video.RTMPVideoSource
-import com.dimadesu.lifestreamer.ui.main.RtmpSourceSwitchHelper
+import com.dimadesu.lifestreamer.sources.SourceChoice
 import io.github.thibaultbee.streampack.core.elements.processing.video.composition.LayerRect
 import io.github.thibaultbee.streampack.core.elements.processing.video.composition.LayerScaleMode
 import io.github.thibaultbee.streampack.core.elements.processing.video.composition.VideoLayer
@@ -29,17 +31,6 @@ import io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.bitmap.BitmapSourceFactory
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.CameraSourceFactory
 import io.github.thibaultbee.streampack.core.elements.sources.video.composite.LayerSpec
-
-/**
- * What feeds the second layer of the composition.
- */
-enum class PipSourceKind(val label: String) {
-    TEST_IMAGE("Test image"),
-    CAMERA("Second camera"),
-    USB("USB camera"),
-    SCREEN("Screen"),
-    RTMP("RTMP / SRT source")
-}
 
 /** The two layers the app composes. Fixed ids: failure handling, USB and labels key on them. */
 object CompositionLayers {
@@ -52,28 +43,22 @@ object CompositionLayers {
  *
  * A screen layer needs a MediaProjection grant and a USB layer needs the UVC helper, and both are
  * obtained through interactive dialogs on the phone. The service cannot produce either, so the
- * ViewModel registers itself as this while it is alive; without it those kinds are offered as
+ * ViewModel registers itself as this while it is alive; without it those sources are offered as
  * unavailable, with the reason, instead of silently doing nothing.
  */
-interface ExternalPipSourceProvider {
-    /** A factory for [kind], or null if it cannot be built right now. */
-    fun factoryFor(kind: PipSourceKind): IVideoSourceInternal.Factory?
+interface ExternalLayerSources {
+    /** A factory for [choice] (USB or screen), or null if it cannot be built right now. */
+    fun factoryFor(choice: SourceChoice): IVideoSourceInternal.Factory?
 
-    /** Why [kind] cannot be used right now, or null if it can. */
-    fun reasonUnavailable(kind: PipSourceKind): String?
+    /** Why [choice] cannot be built right now, or null if it can. */
+    fun reasonUnavailable(choice: SourceChoice): String?
 }
 
 /**
- * The result of building the second layer. [isPlaceholder] is true when the requested source could
- * not be built and the test image stands in for it; [note] says why, for the operator.
+ * A layer, built. [placeholderReason] is set when the chosen source could not be built and the
+ * test image stands in for it, saying why.
  */
-data class PipBuild(
-    val spec: LayerSpec,
-    val isPlaceholder: Boolean,
-    val note: String? = null,
-    /** The player an RTMP layer shows: nothing else releases it. */
-    val player: androidx.media3.exoplayer.ExoPlayer? = null
-)
+data class LayerBuild(val spec: LayerSpec, val placeholderReason: String? = null)
 
 /**
  * Builds the layer specs the composition is made of.
@@ -82,12 +67,7 @@ data class PipBuild(
  * control runs precisely when the app's screen is gone, and everything that only lived in the
  * ViewModel was out of its reach.
  */
-class CompositionSources(
-    private val application: Application,
-    private val capabilities: CompositionCapabilities,
-    /** URL and playback buffer of the RTMP source used for the second layer, or null if unset. */
-    private val rtmpPipConfig: suspend () -> Pair<String, Int>?
-) {
+class CompositionSources(private val application: Application) {
     /** Also the placeholder: a bitmap source cannot fail, which makes it a safe terminal state. */
     val testBitmap: Bitmap by lazy {
         BitmapFactory.decodeResource(application.resources, R.drawable.img_test)
@@ -107,80 +87,52 @@ class CompositionSources(
         scaleMode = LayerScaleMode.FIT
     )
 
-    /**
-     * @param pairedWithCamera true when the second layer is also a camera: both devices must then
-     * stay inside the concurrent-pair configuration, so the main camera is capped too -- capping
-     * only the small one would still fail to open.
-     */
-    fun mainSpec(cameraId: String, pairedWithCamera: Boolean) = LayerSpec(
-        layer = mainLayer(),
-        childFactory = CameraSourceFactory(cameraId),
-        captureResolution = if (pairedWithCamera) capabilities.report().concurrentCameraMaxSize else null
-    )
+    fun defaultLayer(layerId: String) = if (layerId == CompositionLayers.MAIN) mainLayer() else pipLayer()
 
-    /** The test image in [layer]: the second layer by default, keeping its place when given. */
-    fun placeholderSpec(layer: VideoLayer = pipLayer()) = LayerSpec(
+    /** The test image in [layer], keeping its place. */
+    fun placeholderSpec(layer: VideoLayer) = LayerSpec(
         layer = layer,
         childFactory = BitmapSourceFactory(testBitmap)
     )
 
     /**
-     * Builds the second layer for [kind]. A source that cannot be built right now degrades to the
+     * Builds [layer] showing [choice]. A source that cannot be built right now degrades to the
      * placeholder instead of failing the whole composition.
+     *
+     * @param captureResolution the cap for a camera that runs next to another one
+     * @param rtmpPlayer the player of an RTMP layer, or null when the source has no URL
      */
-    suspend fun pipSpec(
-        kind: PipSourceKind,
-        primaryCameraId: String,
-        external: ExternalPipSourceProvider?,
-        /** The layer as it is now, so a new source keeps its place, size and style. */
-        layer: VideoLayer = pipLayer()
-    ): PipBuild = when (kind) {
-        PipSourceKind.TEST_IMAGE -> PipBuild(placeholderSpec(layer), isPlaceholder = true)
+    suspend fun layerSpec(
+        choice: SourceChoice,
+        layer: VideoLayer,
+        external: ExternalLayerSources?,
+        captureResolution: Size?,
+        rtmpPlayer: suspend () -> ExoPlayer?,
+    ): LayerBuild = when (choice) {
+        SourceChoice.TestImage -> LayerBuild(placeholderSpec(layer))
 
-        PipSourceKind.CAMERA -> {
-            val secondId = capabilities.secondCameraFor(primaryCameraId)
-            if (secondId == null) {
-                PipBuild(
-                    placeholderSpec(layer), isPlaceholder = true,
-                    note = capabilities.reasonSecondCameraUnavailable(primaryCameraId)
-                )
-            } else {
-                PipBuild(
-                    LayerSpec(
-                        layer = layer,
-                        childFactory = CameraSourceFactory(secondId),
-                        // Both cameras of a concurrent pair have to stay inside the guaranteed
-                        // configuration, so the capture size is capped rather than inherited.
-                        captureResolution = capabilities.report().concurrentCameraMaxSize
-                    ),
-                    isPlaceholder = false
-                )
-            }
-        }
-
-        PipSourceKind.RTMP -> try {
-            val (url, bufferMs) = rtmpPipConfig() ?: error("RTMP source 1 has no URL")
-            require(url.isNotBlank()) { "RTMP source 1 has no URL" }
-            val player = RtmpSourceSwitchHelper.createExoPlayer(application, url, bufferMs)
-            PipBuild(
-                LayerSpec(layer = layer, childFactory = RTMPVideoSource.Factory(player)),
-                isPlaceholder = false,
-                player = player
+        is SourceChoice.Camera -> LayerBuild(
+            LayerSpec(
+                layer = layer,
+                childFactory = CameraSourceFactory(choice.id),
+                captureResolution = captureResolution
             )
+        )
+
+        is SourceChoice.Rtmp -> try {
+            val player = rtmpPlayer() ?: error("RTMP source ${choice.index} has no URL")
+            LayerBuild(LayerSpec(layer = layer, childFactory = RTMPVideoSource.Factory(player)))
         } catch (e: Exception) {
             Log.w(TAG, "Could not build the RTMP layer: ${e.message}")
-            PipBuild(placeholderSpec(layer), isPlaceholder = true, note = "RTMP source unavailable - showing placeholder")
+            LayerBuild(placeholderSpec(layer), "RTMP ${choice.index} unavailable - showing placeholder")
         }
 
-        PipSourceKind.SCREEN, PipSourceKind.USB -> {
-            val factory = external?.factoryFor(kind)
+        SourceChoice.Usb, SourceChoice.Screen -> {
+            val factory = external?.factoryFor(choice)
             if (factory == null) {
-                PipBuild(
-                    placeholderSpec(layer), isPlaceholder = true,
-                    note = external?.reasonUnavailable(kind) ?: OPEN_APP_REASON
-                )
+                LayerBuild(placeholderSpec(layer), external?.reasonUnavailable(choice) ?: OPEN_APP_REASON)
             } else {
-                PipBuild(LayerSpec(layer = layer, childFactory = factory), isPlaceholder = false)
+                LayerBuild(LayerSpec(layer = layer, childFactory = factory))
             }
         }
     }

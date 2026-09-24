@@ -52,6 +52,11 @@ class SourceController(
     var host: AppSourceHost? = null
         set(value) {
             field = value
+            // The same screen builds the layers only it can build (USB, screen capture)
+            composition.externalSources = value
+            // A USB layer left waiting while the app was closed opens again with it (the screen
+            // is not asked for again on its own: that is a dialog every time the app opens)
+            if (value != null) prepareWaitingLayers(usbOnly = true)
             changed()
         }
 
@@ -128,13 +133,7 @@ class SourceController(
     var lastRtmp: Int? = null
         private set
 
-    fun label(choice: SourceChoice): String = when (choice) {
-        is SourceChoice.Camera -> composition.displayName(choice.id)
-        is SourceChoice.Rtmp -> "RTMP ${choice.index}"
-        SourceChoice.Usb -> "USB camera"
-        SourceChoice.Screen -> "Screen"
-        SourceChoice.TestImage -> "Test image"
-    }
+    fun label(choice: SourceChoice): String = composition.choiceLabel(choice)
 
     private fun detail(choice: SourceChoice): String? = when (choice) {
         is SourceChoice.Rtmp -> _rtmp.value.firstOrNull { it.index == choice.index }?.host
@@ -146,6 +145,16 @@ class SourceController(
         val current = currentTopLevel()
         return SourceRules.options(context, null).map { choice ->
             Option(choice, label(choice), detail(choice), SourceRules.verdict(choice, context), choice == current)
+        }
+    }
+
+    /** What [layerId] of the running composition can show, next to what the others show. */
+    fun layerOptions(layerId: String): List<Option> {
+        val layers = composition.layerChoices.value
+        val context = context(layers)
+        val current = layers[layerId]
+        return SourceRules.options(context, layerId).map { choice ->
+            Option(choice, label(choice), detail(choice), SourceRules.verdict(choice, context, layerId), choice == current)
         }
     }
 
@@ -185,6 +194,86 @@ class SourceController(
             changed()
         }
     }
+
+    // region the composition's layers
+
+    /**
+     * With no composition: the layer that will be the inset when it is turned on, and what it can
+     * show next to what is on screen now.
+     */
+    fun presetOptions(): Pair<String, List<Option>> {
+        val (bottomId, otherId) = composition.upcomingLayers()
+        val onScreen = currentTopLevel()
+        val context = context(listOfNotNull(onScreen?.let { bottomId to it }).toMap())
+        val current = composition.layerChoices.value[otherId]
+        return otherId to SourceRules.options(context, otherId).map { choice ->
+            Option(choice, label(choice), detail(choice), SourceRules.verdict(choice, context, otherId), choice == current)
+        }
+    }
+
+    /** Chooses what [layerId] shows when the composition is turned on. */
+    fun presetLayerSource(layerId: String, choice: SourceChoice): Result<Unit> {
+        val option = presetOptions().second.firstOrNull { it.choice == choice }
+        if (option != null && !option.verdict.available) return Result.failure(IllegalArgumentException(option.verdict.reason))
+        composition.presetLayerSource(layerId, choice)
+        changed()
+        return Result.success(Unit)
+    }
+
+    /**
+     * Makes [layerId] show [choice]. What needs the app's screen to get ready (a USB camera's
+     * permission, a screen-capture grant) is asked for there, and the layer shows the test image
+     * until it arrives.
+     */
+    suspend fun setLayerSource(layerId: String, choice: SourceChoice): Result<Unit> {
+        if (!composition.isCompositionActive) return Result.failure(IllegalStateException("No composition"))
+        val verdict = SourceRules.verdict(choice, context(composition.layerChoices.value), layerId)
+        if (!verdict.available) return Result.failure(IllegalArgumentException(verdict.reason))
+        return composition.setLayerSource(layerId, choice).onSuccess { prepareWaitingLayers() }
+    }
+
+    /**
+     * Turns the composition on, its bottom layer showing what is on screen now: the RTMP source,
+     * USB camera or screen too, not only a camera.
+     */
+    suspend fun enableComposition(): Result<Unit> {
+        // A screen capture ends with the source that used it: the layer asks for a new grant
+        val onScreen = currentTopLevel()
+        return composition.enableComposition(onScreen).onSuccess { prepareWaitingLayers() }
+    }
+
+    /**
+     * Turns the composition off. What the bottom layer showed becomes the whole picture: at once
+     * for a camera; through the app for the rest, or the camera when it cannot be done now.
+     */
+    suspend fun disableComposition(): Result<Unit> {
+        val bottom = composition.disableComposition().getOrElse { return Result.failure(it) }
+            ?: return Result.success(Unit)
+        val verdict = SourceRules.verdict(bottom, context())
+        val app = host
+        if (verdict.available && app != null) {
+            if (bottom is SourceChoice.Rtmp) lastRtmp = bottom.index
+            app.switchTopLevel(bottom)
+        } else {
+            composition.tell("${label(bottom)} stays off: ${verdict.reason ?: SourceRules.NEEDS_APP}")
+        }
+        return Result.success(Unit)
+    }
+
+    /** USB and screen layers waiting for the app: asked for there, when the app is there. */
+    private fun prepareWaitingLayers(usbOnly: Boolean = false) {
+        val app = host ?: return
+        if (!composition.isCompositionActive) return
+        composition.layerChoices.value.forEach { (layerId, choice) ->
+            if ((choice == SourceChoice.Usb || (choice == SourceChoice.Screen && !usbOnly)) &&
+                composition.placeholderReason(layerId) != null
+            ) {
+                app.prepareLayerSource(layerId, choice)
+            }
+        }
+    }
+
+    // endregion
 
     companion object {
         private const val TAG = "SourceController"

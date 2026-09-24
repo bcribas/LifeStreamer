@@ -44,7 +44,6 @@ object RemoteDto {
         val stream: StreamDto,
         /** #RRGGBB, or null when there is no composition. */
         val backgroundColor: String?,
-        val pipSources: List<PipSourceDto>,
         val recording: RecordingDto,
         /** Every camera in use and its controls: each camera layer, or the one camera. */
         val cameraTargets: List<CameraTargetDto> = emptyList(),
@@ -158,19 +157,12 @@ object RemoteDto {
         val alpha: Float,
         val mirror: Boolean,
         val rotation: Int,
-        /** For the second layer: which source kind it is meant to show. */
-        val sourceKind: String?,
-        /** True when that source could not be built or died and the test image stands in. */
-        val onPlaceholder: Boolean
-    )
-
-    @Keep
-    data class PipSourceDto(
-        val kind: String,
-        val label: String,
-        val available: Boolean,
-        val reason: String?,
-        val active: Boolean
+        /** What the layer is meant to show, as a source key (see [SourceOptionDto.key]). */
+        val source: String?,
+        /** Why the test image stands in for that source, or null when it shows. */
+        val placeholderReason: String?,
+        /** What else it can show, and why not. */
+        val sourceOptions: List<SourceOptionDto> = emptyList()
     )
 
     @Keep
@@ -370,8 +362,13 @@ object RemoteDto {
     @Keep
     data class CompositionRequest(val enabled: Boolean? = null)
 
+    /** [source] is a source key; [kind] the older second-layer kind, for the second layer. */
     @Keep
-    data class PipSourceRequest(val kind: String? = null)
+    data class LayerSourceRequest(
+        val layerId: String? = null,
+        val source: String? = null,
+        val kind: String? = null
+    )
 
     @Keep
     data class LayerStyleRequest(

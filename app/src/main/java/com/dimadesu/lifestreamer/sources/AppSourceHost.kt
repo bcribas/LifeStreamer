@@ -6,7 +6,7 @@ package com.dimadesu.lifestreamer.sources
  * registers itself as this while it is alive (see [SourceController.host]); without it, only
  * cameras can be switched.
  */
-interface AppSourceHost {
+interface AppSourceHost : com.dimadesu.lifestreamer.composition.ExternalLayerSources {
     /** The app is in front, so a permission can be asked for on the phone. */
     val canAskOnPhone: Boolean
 
@@ -24,4 +24,11 @@ interface AppSourceHost {
      * what happens (a permission asked on the phone, the switch) shows in the state.
      */
     fun switchTopLevel(choice: SourceChoice)
+
+    /**
+     * Gets [choice] (USB or screen) ready for [layerId], which shows the test image meanwhile:
+     * the USB camera's permission and opening, or a screen-capture grant asked for on the phone.
+     * Returns at once; the layer takes the source when it is ready.
+     */
+    fun prepareLayerSource(layerId: String, choice: SourceChoice)
 }

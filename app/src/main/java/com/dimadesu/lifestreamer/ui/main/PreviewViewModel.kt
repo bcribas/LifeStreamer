@@ -51,8 +51,6 @@ import com.dimadesu.lifestreamer.rtmp.audio.MediaProjectionHelper
 import com.dimadesu.lifestreamer.rtmp.video.RTMPVideoSource
 import com.dimadesu.lifestreamer.uvc.UvcVideoSource
 import com.dimadesu.lifestreamer.composition.CompositionLayers
-import com.dimadesu.lifestreamer.composition.ExternalPipSourceProvider
-import com.dimadesu.lifestreamer.composition.PipSourceKind
 import com.dimadesu.lifestreamer.audio.ConditionalAudioSourceFactory
 import io.github.thibaultbee.streampack.core.elements.sources.IMediaProjectionSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.mediaprojection.MediaProjectionVideoSourceFactory
@@ -138,7 +136,7 @@ import kotlinx.coroutines.withContext
 
 
 class PreviewViewModel(private val application: Application) : ObservableViewModel(),
-    com.dimadesu.lifestreamer.power.ThermalActuator, ExternalPipSourceProvider,
+    com.dimadesu.lifestreamer.power.ThermalActuator,
     com.dimadesu.lifestreamer.sources.AppSourceHost {
     private val storageRepository = DataStoreRepository(application, application.dataStore)
     private val streamConfigurationHelper = StreamConfigurationHelper(storageRepository)
@@ -1412,9 +1410,8 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                                 Log.w(TAG, "Failed to collect composition messages: ${t.message}")
                             }
 
-                            // Screen and USB layers need grants that only this screen can ask for.
-                            binder.compositionController().externalPipProvider = this@PreviewViewModel
-                            // The page switches sources through this screen while it is alive
+                            // The page switches sources through this screen while it is alive, and
+                            // the screen and USB layers need grants only this screen can ask for
                             binder.sourceController().host = this@PreviewViewModel
 
                             // The buttons, sliders and panel follow the cameras' controls,
@@ -4366,22 +4363,18 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
 
 
     /**
-     * Toggles a two-layer composition: the current camera full frame, with a picture-in-picture
-     * in the bottom-right corner.
-     *
-     * This is the milestone-1 wiring for the compositor: a bitmap second layer cannot fail, which
-     * makes it the cheapest way to prove on a real device that a composited frame reaches both the
-     * preview and the encoder. Real second sources (USB, screen, network, a second camera) and the
-     * layout UI come later; the engine underneath is the same.
+     * Turns the composition on or off. On: the bottom layer shows what is on screen now (camera,
+     * RTMP source, USB camera or screen) and the other one what it showed last time. Off: what the
+     * bottom layer showed becomes the whole picture.
      */
     fun toggleCompositeSource() {
-        val controller = compositionController
+        val controller = sourceController
         if (controller == null) {
             _streamerErrorLiveData.postValue("Service not available")
             return
         }
 
-        // The lifecycle lives in the controller now, so the remote page can do the same with the
+        // The lifecycle lives in the service now, so the remote page can do the same with the
         // app's screen gone. The screen-side reactions (the bar, the selection, monitor audio)
         // happen in onVideoSourceChanged, whichever side made the change.
         viewModelScope.launch {
@@ -4397,206 +4390,207 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
         }
     }
 
+    /** What [layerId] can show, and why not, for the phone's source picker. */
+    fun layerSourceOptions(layerId: String): List<com.dimadesu.lifestreamer.sources.SourceController.Option> =
+        sourceController?.layerOptions(layerId).orEmpty()
+
+    /** With no composition: the future inset layer and what it can show, for the phone's picker. */
+    fun presetSourceOptions(): Pair<String, List<com.dimadesu.lifestreamer.sources.SourceController.Option>>? =
+        sourceController?.presetOptions()
+
+    fun presetLayerSource(layerId: String, choice: com.dimadesu.lifestreamer.sources.SourceChoice) {
+        sourceController?.presetLayerSource(layerId, choice)?.onFailure {
+            _streamerErrorLiveData.postValue(it.message)
+        }
+    }
+
+    /** The layer the phone's source picker acts on: the selected one, else the bottom one. */
+    fun layerForSourcePicker(): String? {
+        val layout = activeComposite()?.layoutFlow?.value ?: return null
+        return _selectedCompositionLayerId.value?.takeIf { layout[it] != null }
+            ?: layout.layers.minByOrNull { it.z }?.id
+    }
+
+    fun layerName(layerId: String): String = compositionController?.layerLabel(layerId) ?: layerId
+
     /**
-     * Whether this device can actually run two of its own cameras at once. Probed once, lazily,
-     * because the answer is a device fact that never changes at runtime.
+     * Makes [layerId] show [choice], from the phone. A permission it needs is asked for here the
+     * same way as when the page asks: the layer shows the test image until it is accepted.
      */
-    val compositionCapabilities by lazy {
-        com.dimadesu.lifestreamer.composition.CompositionCapabilities(application)
+    fun chooseLayerSource(layerId: String, choice: com.dimadesu.lifestreamer.sources.SourceChoice) {
+        val controller = sourceController ?: return
+        viewModelScope.launch {
+            controller.setLayerSource(layerId, choice).onFailure {
+                _streamerErrorLiveData.postValue("Could not switch the layer: ${it.message}")
+            }
+        }
+    }
+
+    // region the layers only this screen can build (USB camera, screen capture)
+
+    override fun prepareLayerSource(layerId: String, choice: com.dimadesu.lifestreamer.sources.SourceChoice) {
+        viewModelScope.launch { prepareLayer(PendingSource(layerId, choice), launcher = null) }
     }
 
     /**
-     * Why a given second-layer source cannot be used right now, or null when it can.
-     *
-     * The picker shows unavailable options disabled with this reason rather than hiding them:
-     * the question an operator actually has is "why can't I?", and a missing row never answers it.
+     * Gets a USB camera or the screen ready for a layer. Screen capture is asked for with the
+     * screen's launcher: without one it waits for the fragment, which has it.
      */
-    fun reasonPipSourceUnavailable(source: PipSourceKind): String? {
-        // Here, on the phone, a missing screen grant is not a reason to refuse: choosing Screen is
-        // exactly what asks for it. Only the remote page, which cannot show that dialog, is told no.
-        if (source == PipSourceKind.SCREEN) return null
-        val controller = compositionController ?: return "Service not available"
-        return controller.pipSourceOptions().firstOrNull { it.kind == source }?.reason
+    private fun prepareLayer(
+        pending: PendingSource,
+        launcher: androidx.activity.result.ActivityResultLauncher<Intent>?,
+    ) {
+        when (pending.choice) {
+            com.dimadesu.lifestreamer.sources.SourceChoice.Usb -> {
+                if (!usbPermitted) waitOnPhone(pending, com.dimadesu.lifestreamer.sources.SourceRules.ALLOW_USB)
+                prepareUvcForComposition()
+            }
+            com.dimadesu.lifestreamer.sources.SourceChoice.Screen -> {
+                usableProjection()?.let {
+                    attachScreenLayer(it)
+                    return
+                }
+                if (launcher == null) {
+                    askOnPhone(pending, com.dimadesu.lifestreamer.sources.SourceRules.ACCEPT_CAPTURE)
+                    return
+                }
+                waitOnPhone(pending, com.dimadesu.lifestreamer.sources.SourceRules.ACCEPT_CAPTURE)
+                // A token whose virtual display was created and released cannot be reused, so an
+                // exhausted one is not offered by usableProjection and a new grant is asked for
+                mediaProjectionHelper.requestProjection(launcher) { projection ->
+                    if (projection != null) {
+                        startupMediaProjection = projection
+                        Log.i(TAG, "MediaProjection granted for the screen layer")
+                        attachScreenLayer(projection)
+                    } else {
+                        Log.w(TAG, "MediaProjection denied for the screen layer")
+                        stopWaitingOnPhone()
+                        _streamerErrorLiveData.postValue("Screen permission denied - layer not available")
+                    }
+                }
+            }
+            else -> Unit
+        }
     }
 
-    private fun currentCameraIdOrDefault(): String =
-        lastUsedCameraId
-            ?: application.cameraManager.cameras.firstOrNull()
-            ?: "0"
-
-    /** What the second layer is meant to show; owned by the controller. */
-    val compositionPipSource: PipSourceKind
-        get() = compositionController?.pipSource?.value ?: PipSourceKind.TEST_IMAGE
-
-    fun setCompositionPipSource(source: PipSourceKind) {
+    private fun attachScreenLayer(projection: android.media.projection.MediaProjection) {
         val controller = compositionController ?: return
         viewModelScope.launch {
-            // Applied live now; it used to change only the chip's label until COMPOSE was cycled.
-            controller.setPipSource(source).onFailure {
-                _streamerErrorLiveData.postValue("Could not switch the second layer: ${it.message}")
-            }
-        }
-        Log.i(TAG, "Composition picture-in-picture source set to ${source.label}")
-    }
-
-    /**
-     * Makes sure a usable [MediaProjection] exists before a screen layer is built.
-     *
-     * A token whose virtual display has already been created and released cannot be reused, so an
-     * exhausted one is discarded and a new grant requested.
-     */
-    fun ensureMediaProjectionForComposition(
-        mediaProjectionLauncher: androidx.activity.result.ActivityResultLauncher<Intent>
-    ) {
-        val existing = startupMediaProjection
-            ?: streamingMediaProjection
-            ?: mediaProjectionHelper.getMediaProjection()
-
-        if (existing != null &&
-            !MediaProjectionVideoSourceFactory.isProjectionExhaustedForVideo(existing)
-        ) {
-            Log.i(TAG, "Reusing the existing MediaProjection for the screen layer")
-            return
-        }
-
-        mediaProjectionHelper.requestProjection(mediaProjectionLauncher) { projection ->
-            if (projection != null) {
-                startupMediaProjection = projection
-                Log.i(TAG, "MediaProjection granted for the screen layer")
-                // The layer was built before the grant arrived and fell back to the placeholder;
-                // now that it can be built for real, put the screen in.
-                if (compositionPipSource == PipSourceKind.SCREEN && activeComposite() != null) {
-                    setCompositionPipSource(PipSourceKind.SCREEN)
-                }
-            } else {
-                Log.w(TAG, "MediaProjection denied for the screen layer")
-                _streamerErrorLiveData.postValue("Screen permission denied - layer not available")
-            }
+            controller.attachDeferredSource(
+                com.dimadesu.lifestreamer.sources.SourceChoice.Screen,
+                MediaProjectionVideoSourceFactory(projection, videoConfigLiveData.value?.fps ?: 30)
+            )
         }
     }
 
     /**
-     * Opens a USB camera for the composition's second layer.
+     * Opens a USB camera for the composition layer that shows it.
      *
      * Deliberately separate from [toggleUvcSource]: that one's callbacks replace the *whole* video
-     * source, which is exactly wrong here. These only ever swap the picture-in-picture layer, so
-     * the main camera is never interrupted by a cable being plugged or pulled. The
+     * source, which is exactly wrong here. These only ever swap the layer's source, so the other
+     * layers are never interrupted by a cable being plugged or pulled. The
      * [com.herohan.uvcapp.CameraHelper] instance is still shared through [uvcCameraHelper],
-     * because two helpers on one USB device fight each other.
+     * because two helpers on one USB device fight each other; it takes these callbacks, as the
+     * whole picture's would switch the whole picture.
      */
-    fun prepareUvcForComposition() {
-        val existing = uvcCameraHelper
-        if (existing != null) {
-            val devices = existing.deviceList
-            if (!devices.isNullOrEmpty()) {
-                Log.i(TAG, "Reusing the existing USB helper for the composition")
-                existing.selectDevice(devices[0])
-            } else {
-                _streamerErrorLiveData.postValue("No USB camera connected")
-            }
+    private fun prepareUvcForComposition() {
+        val helper = uvcCameraHelper ?: com.herohan.uvcapp.CameraHelper().also { uvcCameraHelper = it }
+        helper.setStateCallback(compositionUvcCallback)
+        if (helper.isCameraOpened) {
+            // Left open by the whole picture's USB source: nothing to wait for
+            attachUsbLayer(helper)
             return
         }
-
-        val helper = com.herohan.uvcapp.CameraHelper().apply {
-            setStateCallback(object : com.herohan.uvcapp.ICameraHelper.StateCallback {
-                override fun onAttach(device: android.hardware.usb.UsbDevice) {
-                    Log.i(TAG, "USB camera attached for the composition: ${device.deviceName}")
-                    if (isCompositionUsbLayerWanted()) {
-                        selectDevice(device)
-                    }
-                }
-
-                override fun onDeviceOpen(
-                    device: android.hardware.usb.UsbDevice,
-                    isFirstOpen: Boolean
-                ) {
-                    Log.i(TAG, "USB device opened for the composition (first=$isFirstOpen)")
-                    if (!isCompositionUsbLayerWanted()) {
-                        return
-                    }
-                    val controller = compositionController ?: return
-                    val usbHelper = this@apply
-                    viewModelScope.launch {
-                        controller.replacePipSource(UvcVideoSource.Factory(usbHelper))
-                            .onSuccess {
-                                _rtmpStatusLiveData.postValue(null)
-                                Log.i(TAG, "USB camera is now the picture-in-picture")
-                            }
-                            .onFailure {
-                                Log.e(TAG, "Failed to put the USB camera in the layer: ${it.message}", it)
-                            }
-                    }
-                }
-
-                override fun onCameraOpen(device: android.hardware.usb.UsbDevice) {
-                    // The source has to re-add its surfaces once the device is really ready.
-                    val layerSource = activeComposite()?.childSource(COMPOSITION_LAYER_PIP)
-                    if (layerSource is UvcVideoSource) {
-                        layerSource.onCameraReady(device)
-                    }
-                }
-
-                override fun onCameraClose(device: android.hardware.usb.UsbDevice) = markUvcSourcesClosed()
-
-                override fun onDeviceClose(device: android.hardware.usb.UsbDevice) = Unit
-
-                override fun onCancel(device: android.hardware.usb.UsbDevice) {
-                    // The USB permission dialog was dismissed or denied.
-                    Log.w(TAG, "USB permission refused for the composition layer")
-                    _streamerErrorLiveData.postValue("USB permission denied - layer not available")
-                }
-
-                override fun onDetach(device: android.hardware.usb.UsbDevice) {
-                    Log.w(TAG, "USB camera detached from the composition")
-                    val controller = compositionController ?: return
-                    if (!isCompositionUsbLayerWanted() || controller.isPipOnPlaceholder) {
-                        return
-                    }
-                    viewModelScope.launch {
-                        controller.degradePipToPlaceholder("USB camera unplugged - showing placeholder")
-                        _rtmpStatusLiveData.postValue("USB camera unplugged - showing placeholder")
-                    }
-                }
-            })
-        }
-        uvcCameraHelper = helper
-
         val devices = helper.deviceList
         if (devices.isNullOrEmpty()) {
             _streamerErrorLiveData.postValue("No USB camera connected")
             Log.w(TAG, "No USB device found for the composition")
             return
         }
-
         Log.i(TAG, "Selecting USB device for the composition: ${devices[0].deviceName}")
         // Triggers the permission dialog when needed; onDeviceOpen follows either way.
         helper.selectDevice(devices[0])
     }
 
-    // region ExternalPipSourceProvider -- the layers only this screen can build
+    private fun attachUsbLayer(helper: com.herohan.uvcapp.CameraHelper) {
+        val controller = compositionController ?: return
+        viewModelScope.launch {
+            controller.attachDeferredSource(com.dimadesu.lifestreamer.sources.SourceChoice.Usb, UvcVideoSource.Factory(helper))
+                .onSuccess {
+                    _rtmpStatusLiveData.postValue(null)
+                    Log.i(TAG, "USB camera is now in the composition")
+                }
+                .onFailure { Log.e(TAG, "Failed to put the USB camera in the layer: ${it.message}", it) }
+        }
+    }
+
+    /** The USB camera's events while a composition layer shows it. */
+    private val compositionUvcCallback = object : com.herohan.uvcapp.ICameraHelper.StateCallback {
+        override fun onAttach(device: android.hardware.usb.UsbDevice) {
+            Log.i(TAG, "USB camera attached for the composition: ${device.deviceName}")
+            if (usbLayerId() != null) uvcCameraHelper?.selectDevice(device)
+        }
+
+        override fun onDeviceOpen(device: android.hardware.usb.UsbDevice, isFirstOpen: Boolean) {
+            Log.i(TAG, "USB device opened for the composition (first=$isFirstOpen)")
+            val helper = uvcCameraHelper ?: return
+            if (usbLayerId() == null) return
+            attachUsbLayer(helper)
+            // The camera itself opens now, as for the whole picture; onCameraOpen follows
+            helper.openCamera(getSavedUvcVideoConfig(device))
+        }
+
+        override fun onCameraOpen(device: android.hardware.usb.UsbDevice) {
+            // The source has to re-add its surfaces once the device is really ready.
+            usbLayerSource()?.onCameraReady(device)
+        }
+
+        override fun onCameraClose(device: android.hardware.usb.UsbDevice) = markUvcSourcesClosed()
+
+        override fun onDeviceClose(device: android.hardware.usb.UsbDevice) = Unit
+
+        override fun onCancel(device: android.hardware.usb.UsbDevice) {
+            // The USB permission dialog was dismissed or denied.
+            Log.w(TAG, "USB permission refused for the composition layer")
+            stopWaitingOnPhone()
+            _streamerErrorLiveData.postValue("USB permission denied - layer not available")
+        }
+
+        override fun onDetach(device: android.hardware.usb.UsbDevice) {
+            Log.w(TAG, "USB camera detached from the composition")
+            val layerId = usbLayerId() ?: return
+            val controller = compositionController ?: return
+            viewModelScope.launch {
+                controller.degradeLayerToPlaceholder(layerId, "USB camera unplugged - showing placeholder")
+            }
+        }
+    }
 
     private fun usableProjection(): android.media.projection.MediaProjection? =
         (startupMediaProjection ?: streamingMediaProjection ?: mediaProjectionHelper.getMediaProjection())
             ?.takeUnless { MediaProjectionVideoSourceFactory.isProjectionExhaustedForVideo(it) }
 
-    override fun factoryFor(kind: PipSourceKind): IVideoSourceInternal.Factory? = when (kind) {
-        PipSourceKind.SCREEN -> usableProjection()?.let {
-            MediaProjectionVideoSourceFactory(it, videoConfigLiveData.value?.fps ?: 30)
+    override fun factoryFor(choice: com.dimadesu.lifestreamer.sources.SourceChoice): IVideoSourceInternal.Factory? =
+        when (choice) {
+            com.dimadesu.lifestreamer.sources.SourceChoice.Screen -> usableProjection()?.let {
+                MediaProjectionVideoSourceFactory(it, videoConfigLiveData.value?.fps ?: 30)
+            }
+            // Only a camera already open; otherwise the layer waits for it (onDeviceOpen)
+            com.dimadesu.lifestreamer.sources.SourceChoice.Usb -> uvcCameraHelper
+                ?.takeIf { it.isCameraOpened }
+                ?.let { UvcVideoSource.Factory(it) }
+            else -> null
         }
-        PipSourceKind.USB -> uvcCameraHelper
-            ?.takeUnless { it.deviceList.isNullOrEmpty() }
-            ?.let { UvcVideoSource.Factory(it) }
-        else -> null
-    }
 
-    override fun reasonUnavailable(kind: PipSourceKind): String? = when (kind) {
-        PipSourceKind.SCREEN ->
-            if (usableProjection() == null) "Needs screen permission, granted on the phone" else null
-        PipSourceKind.USB ->
-            if (uvcCameraHelper?.deviceList.isNullOrEmpty() &&
-                (application.getSystemService(android.content.Context.USB_SERVICE)
-                        as android.hardware.usb.UsbManager).deviceList.isEmpty()
-            ) "No USB camera connected" else null
+    override fun reasonUnavailable(choice: com.dimadesu.lifestreamer.sources.SourceChoice): String? = when (choice) {
+        com.dimadesu.lifestreamer.sources.SourceChoice.Screen ->
+            if (usableProjection() == null) com.dimadesu.lifestreamer.sources.SourceRules.ACCEPT_CAPTURE else null
+        com.dimadesu.lifestreamer.sources.SourceChoice.Usb -> when {
+            !usbConnected -> "No USB camera connected"
+            !usbPermitted -> com.dimadesu.lifestreamer.sources.SourceRules.ALLOW_USB
+            uvcCameraHelper?.isCameraOpened != true -> "Opening the USB camera"
+            else -> null
+        }
         else -> null
     }
 
@@ -4605,11 +4599,50 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
     /** The USB camera sources in use (the source, or a layer's), told their camera is gone. */
     private fun markUvcSourcesClosed() {
         (serviceStreamer?.videoInput?.sourceFlow?.value as? UvcVideoSource)?.onCameraClosed()
-        (activeComposite()?.childSource(COMPOSITION_LAYER_PIP) as? UvcVideoSource)?.onCameraClosed()
+        usbLayerSource()?.onCameraClosed()
     }
 
-    private fun isCompositionUsbLayerWanted(): Boolean =
-        _isCompositeSource.value == true && compositionPipSource == PipSourceKind.USB
+    /** The composition layer meant to show the USB camera, if any. */
+    private fun usbLayerId(): String? =
+        activeComposite()?.let { compositionController?.layerWith(com.dimadesu.lifestreamer.sources.SourceChoice.Usb) }
+
+    private fun usbLayerSource(): UvcVideoSource? =
+        usbLayerId()?.let { activeComposite()?.childSource(it) as? UvcVideoSource }
+
+    /**
+     * A composition took over the whole picture: what this screen ran as the whole picture's
+     * source stops here. Its RTMP player and retries would otherwise go on, and on a
+     * disconnection switch the whole picture back, throwing the composition away.
+     */
+    private fun leaveTopLevelForComposition() {
+        if (currentRtmpPlayer != null || rtmpRetryJob != null || _activeRtmpIndex.value != null) {
+            rtmpRetryJob?.cancel()
+            rtmpRetryJob = null
+            isHandlingDisconnection = false
+            bufferingCheckJob?.cancel()
+            bufferingCheckJob = null
+            rtmpBufferingStartTime = 0L
+            rtmpDisconnectListener?.let { listener -> runCatching { currentRtmpPlayer?.removeListener(listener) } }
+            rtmpDisconnectListener = null
+            val left = currentRtmpPlayer
+            currentRtmpPlayer = null
+            left?.let { player ->
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    runCatching {
+                        player.stop()
+                        player.release()
+                    }
+                }
+            }
+            _activeRtmpIndex.postValue(null)
+            _rtmpStatusLiveData.postValue(null)
+            Log.i(TAG, "The composition took over from the RTMP source")
+        }
+        if (_userToggledUvc.value == true) _userToggledUvc.postValue(false)
+        if (_isScreenSource.value == true) _isScreenSource.postValue(false)
+        // The USB camera's events now go to the layer that shows it
+        uvcCameraHelper?.setStateCallback(compositionUvcCallback)
+    }
 
     private fun activeComposite(): ICompositeVideoSource? =
         serviceStreamer?.videoInput?.sourceFlow?.value as? ICompositeVideoSource
@@ -4853,6 +4886,7 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                 // here, instead of only in the code path of the COMPOSE button.
                 val composite = source as ICompositeVideoSource
                 compositionController?.onCompositionAppeared(composite)
+                leaveTopLevelForComposition()
                 observeCompositionLayout(composite)
                 composite.previewMaxFps = previewMaxFps
                 _selectedCompositionLayerId.postValue(CompositionLayers.MAIN)
@@ -4929,10 +4963,15 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                 ?.let { com.dimadesu.lifestreamer.sources.SourceChoice.Camera(it) }
         }
 
-    /** A switch asked for by the page that waits for a permission on the phone. */
-    private val _pendingSourceChoice = kotlinx.coroutines.flow.MutableStateFlow<com.dimadesu.lifestreamer.sources.SourceChoice?>(null)
-    val pendingSourceChoice: kotlinx.coroutines.flow.StateFlow<com.dimadesu.lifestreamer.sources.SourceChoice?> =
-        _pendingSourceChoice
+    /**
+     * A source asked for that waits for a permission on the phone: for the whole picture when
+     * [layerId] is null, else for that layer of the composition.
+     */
+    data class PendingSource(val layerId: String?, val choice: com.dimadesu.lifestreamer.sources.SourceChoice)
+
+    /** A switch asked for (by the page, or for a layer) that needs this screen's launcher. */
+    private val _pendingSourceChoice = kotlinx.coroutines.flow.MutableStateFlow<PendingSource?>(null)
+    val pendingSourceChoice: kotlinx.coroutines.flow.StateFlow<PendingSource?> = _pendingSourceChoice
     private var pendingSourceJob: Job? = null
     private val topLevelMutex = Mutex()
 
@@ -4945,9 +4984,12 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
      * called by the fragment once it is in front (the dialog shows there).
      */
     fun resolvePendingSource(launcher: androidx.activity.result.ActivityResultLauncher<Intent>) {
-        val choice = _pendingSourceChoice.value ?: return
+        val pending = _pendingSourceChoice.value ?: return
         _pendingSourceChoice.value = null
-        viewModelScope.launch { performTopLevel(choice, launcher) }
+        viewModelScope.launch {
+            if (pending.layerId == null) performTopLevel(pending.choice, launcher)
+            else prepareLayer(pending, launcher)
+        }
     }
 
     /**
@@ -4963,7 +5005,7 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                 choice is com.dimadesu.lifestreamer.sources.SourceChoice.Screen) &&
                 android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q && usableProjection() == null
         if (needsCapture && launcher == null) {
-            askOnPhone(choice, com.dimadesu.lifestreamer.sources.SourceRules.ACCEPT_CAPTURE)
+            askOnPhone(PendingSource(null, choice), com.dimadesu.lifestreamer.sources.SourceRules.ACCEPT_CAPTURE)
             return@withLock
         }
         val current = topLevelChoice
@@ -4994,14 +5036,14 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                 }
             is com.dimadesu.lifestreamer.sources.SourceChoice.Rtmp -> toggleVideoSource(launcher, choice.index)
             com.dimadesu.lifestreamer.sources.SourceChoice.Usb -> {
-                if (!usbPermitted) waitOnPhone(choice, com.dimadesu.lifestreamer.sources.SourceRules.ALLOW_USB)
+                if (!usbPermitted) waitOnPhone(PendingSource(null, choice), com.dimadesu.lifestreamer.sources.SourceRules.ALLOW_USB)
                 toggleUvcSource()
             }
             com.dimadesu.lifestreamer.sources.SourceChoice.Screen -> toggleScreenSource(launcher)
             com.dimadesu.lifestreamer.sources.SourceChoice.TestImage -> Unit
         }
         if (launcher != null && needsCapture) {
-            waitOnPhone(choice, com.dimadesu.lifestreamer.sources.SourceRules.ACCEPT_CAPTURE)
+            waitOnPhone(PendingSource(null, choice), com.dimadesu.lifestreamer.sources.SourceRules.ACCEPT_CAPTURE)
         }
         sourceController?.changed()
     }
@@ -5017,26 +5059,42 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
      * Keeps [choice] for the fragment to finish with its launcher, and says on the page what the
      * phone waits for. Given up after a while: nobody may be at the phone.
      */
-    private fun askOnPhone(choice: com.dimadesu.lifestreamer.sources.SourceChoice, text: String) {
-        _pendingSourceChoice.value = choice
-        waitOnPhone(choice, text)
+    private fun askOnPhone(pending: PendingSource, text: String) {
+        _pendingSourceChoice.value = pending
+        waitOnPhone(pending, text)
     }
 
-    /** Says [text] on the page until [choice] is on, or it is given up. */
-    private fun waitOnPhone(choice: com.dimadesu.lifestreamer.sources.SourceChoice, text: String) {
+    /** Says [text] on the page until [pending] is in place, or it is given up. */
+    private fun waitOnPhone(pending: PendingSource, text: String) {
         sourceController?.setPending(text)
         pendingSourceJob?.cancel()
         pendingSourceJob = viewModelScope.launch {
             val done = kotlinx.coroutines.withTimeoutOrNull(PHONE_ACTION_WAIT_MS) {
-                while (topLevelChoice != choice) delay(500)
+                while (!isInPlace(pending)) delay(500)
             } != null
             if (!done) {
-                if (_pendingSourceChoice.value == choice) _pendingSourceChoice.value = null
-                val name = sourceController?.label(choice) ?: choice.key
+                if (_pendingSourceChoice.value == pending) _pendingSourceChoice.value = null
+                val name = sourceController?.label(pending.choice) ?: pending.choice.key
                 _streamerErrorLiveData.postValue("Nothing was accepted on the phone for $name")
             }
             sourceController?.setPending(null)
         }
+    }
+
+    /** A refusal on the phone: the page stops saying it waits. */
+    private fun stopWaitingOnPhone() {
+        pendingSourceJob?.cancel()
+        pendingSourceJob = null
+        _pendingSourceChoice.value = null
+        sourceController?.setPending(null)
+    }
+
+    /** Whether what [pending] asked for is on (or no longer wanted, for a layer moved on). */
+    private fun isInPlace(pending: PendingSource): Boolean {
+        val layerId = pending.layerId ?: return topLevelChoice == pending.choice
+        val controller = compositionController ?: return true
+        if (activeComposite() == null || controller.layerChoices.value[layerId] != pending.choice) return true
+        return controller.placeholderReason(layerId) == null
     }
 
     // endregion
@@ -5422,9 +5480,6 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
         // The policy must not keep a reference to a dead ViewModel.
         try {
             serviceBinder?.thermalPolicy()?.actuator = null
-            serviceBinder?.compositionController()?.let {
-                if (it.externalPipProvider === this) it.externalPipProvider = null
-            }
             serviceBinder?.sourceController()?.let {
                 if (it.host === this) it.host = null
                 it.setPending(null)
@@ -5467,8 +5522,12 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
         currentRtmpPlayer = null
         
         // Clean up UVC camera helper. A USB layer can outlive this screen in the composition:
-        // its controls go with the helper
+        // its controls go with the helper, and the layer shows the test image until the app is back
         markUvcSourcesClosed()
+        compositionController?.degradeLater(
+            com.dimadesu.lifestreamer.sources.SourceChoice.Usb,
+            "The USB camera needs the app open on the phone"
+        )
         uvcCameraHelper?.let { helper ->
             try {
                 helper.stopPreview()

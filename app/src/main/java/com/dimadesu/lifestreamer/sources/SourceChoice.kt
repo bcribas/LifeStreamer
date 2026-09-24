@@ -33,6 +33,28 @@ sealed interface SourceChoice {
     }
 
     companion object {
+        /**
+         * The second layer's source as the app saved it before (a PipSourceKind name). A second
+         * camera was a kind then, not a camera: it is [secondCamera], or the test image.
+         */
+        fun fromLegacyKind(name: String?, secondCamera: () -> String?): SourceChoice? = when (name) {
+            "TEST_IMAGE" -> TestImage
+            "CAMERA" -> secondCamera()?.let { Camera(it) } ?: TestImage
+            "USB" -> Usb
+            "SCREEN" -> Screen
+            "RTMP" -> Rtmp(1)
+            else -> null
+        }
+
+        /** The other way, for a blob an older app may read back. */
+        fun legacyKind(choice: SourceChoice?): String = when (choice) {
+            is Camera -> "CAMERA"
+            is Rtmp -> "RTMP"
+            Usb -> "USB"
+            Screen -> "SCREEN"
+            TestImage, null -> "TEST_IMAGE"
+        }
+
         fun parse(key: String?): SourceChoice? {
             val text = key?.trim() ?: return null
             return when {

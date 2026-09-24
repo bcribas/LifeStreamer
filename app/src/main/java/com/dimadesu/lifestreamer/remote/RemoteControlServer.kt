@@ -19,7 +19,8 @@ import android.content.Context
 import android.util.Log
 import com.dimadesu.lifestreamer.composition.CompositionController
 import com.dimadesu.lifestreamer.composition.CompositionLayers
-import com.dimadesu.lifestreamer.composition.PipSourceKind
+import com.dimadesu.lifestreamer.sources.SourceChoice
+import com.dimadesu.lifestreamer.sources.SourceController
 import io.github.thibaultbee.streampack.core.elements.processing.video.composition.LayerScaleMode
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
@@ -758,22 +759,35 @@ class RemoteControlServer(
                     respondJson(output, 400, RemoteDto.OkResponse(false, "Missing enabled"))
                 } else {
                     launchStructural(if (enabled) "Turning the composition on" else "Turning the composition off") {
-                        if (enabled) controller.enableComposition() else controller.disableComposition()
+                        if (enabled) sources.enableComposition() else sources.disableComposition()
                     }
                     respondJson(output, 202, RemoteDto.OkResponse(true))
                 }
             }
 
             "/api/layer/source" -> {
-                val kind = parse<RemoteDto.PipSourceRequest>(request.body)?.kind
-                    ?.let { runCatching { PipSourceKind.valueOf(it) }.getOrNull() }
-                val option = kind?.let { k -> controller.pipSourceOptions().firstOrNull { it.kind == k } }
+                val body = parse<RemoteDto.LayerSourceRequest>(request.body)
+                val layerId = body?.layerId ?: CompositionLayers.PIP
+                val options = if (controller.isCompositionActive) sources.layerOptions(layerId) else emptyList()
+                val choice = SourceChoice.parse(body?.source)
+                    ?: body?.kind?.let { kind ->
+                        // The older page asked for "a second camera": the first one that can run
+                        SourceChoice.fromLegacyKind(kind) {
+                            options.firstOrNull { it.choice is SourceChoice.Camera && it.verdict.available }
+                                ?.let { (it.choice as SourceChoice.Camera).id }
+                        }
+                    }
+                val option = options.firstOrNull { it.choice == choice }
                 when {
-                    kind == null -> respondJson(output, 400, RemoteDto.OkResponse(false, "Unknown source"))
-                    option?.available == false ->
-                        respondJson(output, 409, RemoteDto.OkResponse(false, option.reason))
+                    !controller.isCompositionActive ->
+                        respondJson(output, 409, RemoteDto.OkResponse(false, "No composition"))
+                    controller.layout?.get(layerId) == null ->
+                        respondJson(output, 400, RemoteDto.OkResponse(false, "No layer $layerId"))
+                    choice == null -> respondJson(output, 400, RemoteDto.OkResponse(false, "Unknown source"))
+                    option?.verdict?.available == false ->
+                        respondJson(output, 409, RemoteDto.OkResponse(false, option.verdict.reason))
                     else -> {
-                        launchStructural("Switching the second layer") { controller.setPipSource(kind) }
+                        launchStructural("Switching a layer's source") { sources.setLayerSource(layerId, choice) }
                         respondJson(output, 202, RemoteDto.OkResponse(true))
                     }
                 }
@@ -932,8 +946,9 @@ class RemoteControlServer(
                 alpha = round2(layer.alpha),
                 mirror = layer.mirror,
                 rotation = layer.rotationDegrees,
-                sourceKind = if (layer.id == CompositionLayers.PIP) controller.pipSource.value.name else null,
-                onPlaceholder = layer.id == CompositionLayers.PIP && controller.isPipOnPlaceholder
+                source = controller.layerChoices.value[layer.id]?.key,
+                placeholderReason = controller.placeholderReason(layer.id),
+                sourceOptions = sources.layerOptions(layer.id).map(::optionDto)
             )
         } ?: emptyList()
 
@@ -966,15 +981,6 @@ class RemoteControlServer(
             stream = hooks.stream(),
             recording = hooks.recording(),
             backgroundColor = layout?.backgroundColor?.let(::formatColor),
-            pipSources = controller.pipSourceOptions().map {
-                RemoteDto.PipSourceDto(
-                    kind = it.kind.name,
-                    label = it.kind.label,
-                    available = it.available,
-                    reason = it.reason,
-                    active = it.kind == controller.pipSource.value
-                )
-            },
             cameraTargets = cameraTargets(),
             source = sourceState()
         )
@@ -984,18 +990,18 @@ class RemoteControlServer(
         current = sources.currentTopLevel()?.key,
         appOpen = sources.host != null,
         pending = sources.pending,
-        options = sources.topLevelOptions().map {
-            RemoteDto.SourceOptionDto(
-                key = it.choice.key,
-                kind = it.choice.key.substringBefore(':'),
-                label = it.label,
-                detail = it.detail,
-                available = it.verdict.available,
-                reason = it.verdict.reason,
-                phoneAction = it.verdict.phoneAction,
-                active = it.active
-            )
-        }
+        options = sources.topLevelOptions().map(::optionDto)
+    )
+
+    private fun optionDto(option: SourceController.Option) = RemoteDto.SourceOptionDto(
+        key = option.choice.key,
+        kind = option.choice.key.substringBefore(':'),
+        label = option.label,
+        detail = option.detail,
+        available = option.verdict.available,
+        reason = option.verdict.reason,
+        phoneAction = option.verdict.phoneAction,
+        active = option.active
     )
 
     /** The camera controls, rounded like the zoom so a value cannot jitter the fingerprint. */
