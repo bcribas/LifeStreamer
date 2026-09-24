@@ -97,6 +97,7 @@ class RecordingController(
             repository.recordingConfigFlow.first().let { config ->
                 updateStatus { it.copy(enabled = config.enabled, mode = config.mode) }
             }
+            mutex.withLock { refreshIdleStateLocked() }
             // The toggle, from the settings or the remote page, applies at once in a session
             repository.recordingConfigFlow.map { it.enabled }.distinctUntilChanged().drop(1)
                 .collect { enabled ->

@@ -600,6 +600,13 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
             thermalMonitor.stateFlow.collect { RemoteControlManager.broadcastState() }
         }
         serviceScope.launch {
+            // Also what creates the controller, so its state (armed or not) is known from the start
+            recordingController.statusFlow.collect {
+                RemoteControlManager.broadcastState()
+                notifyForCurrentState()
+            }
+        }
+        serviceScope.launch {
             thermalPolicy.appliedActionsFlow.collect { RemoteControlManager.broadcastState() }
         }
         serviceScope.launch {
@@ -704,6 +711,26 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
 
         override fun stopStream() {
             serviceScope.launch(Dispatchers.Default) { stopStreamFromService() }
+        }
+
+        override fun recording(): RemoteDto.RecordingDto {
+            val status = recordingController.statusFlow.value
+            return RemoteDto.RecordingDto(
+                enabled = status.enabled,
+                state = status.state.name,
+                mode = status.mode.id,
+                segmentIndex = status.segmentIndex,
+                segmentName = status.segmentName,
+                startedAtMs = status.startedAtMs,
+                resolution = status.resolution,
+                error = status.error,
+                warning = status.warning
+            )
+        }
+
+        // On a request thread, never the main one: checking the folder touches storage.
+        override fun setRecordingEnabled(enabled: Boolean): String? = runBlocking {
+            recordingController.setEnabled(enabled)
         }
 
         override fun power(): RemoteDto.PowerDto = RemoteDto.PowerDto(
@@ -1030,11 +1057,19 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                     // that makes remote commands queue behind it while streaming.
                     val parts = notificationContentFor(serviceStatus)
                     // Same two-second tick feeds the remote page's live stats, computed once.
-                    if (serviceStatus == StreamStatus.STREAMING) {
+                    // A recording that outlives the live (a reconnection) keeps them coming.
+                    val recording = recordingController.stats()
+                    if (serviceStatus == StreamStatus.STREAMING || recording != null) {
+                        val live = serviceStatus == StreamStatus.STREAMING
                         RemoteControlManager.broadcastStats(
-                            parts.bitrateBps?.div(1000),
-                            parts.fps,
-                            streamingStartTime?.let { (System.currentTimeMillis() - it) / 1000 }
+                            RemoteDto.StatsDto(
+                                bitrateKbps = if (live) parts.bitrateBps?.div(1000) else null,
+                                fps = if (live) parts.fps else null,
+                                uptimeSec = if (live) streamingStartTime?.let { (System.currentTimeMillis() - it) / 1000 } else null,
+                                recordingBytes = recording?.bytesWritten,
+                                recordingFreeMb = recording?.freeBytes?.div(1_000_000),
+                                recordingMinutesLeft = recordingMinutesLeft(recording)
+                            )
                         )
                     }
                     val notificationKey = parts.key(serviceStatus, isCurrentlyMuted())
@@ -1089,10 +1124,35 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         val fpsText: String,
         val finalText: String,
         val bitrateBps: Int? = null,
-        val fps: Float? = null
+        val fps: Float? = null,
+        /** "● REC", the recording's error, or empty. */
+        val recordingText: String = ""
     ) {
         fun key(status: StreamStatus, muted: Boolean): String =
-            listOf(status.name, muted, content, bitrateText, fpsText, statusLabel).joinToString("|")
+            listOf(status.name, muted, content, bitrateText, fpsText, statusLabel, recordingText)
+                .joinToString("|")
+    }
+
+    /** Minutes of free space left at the rate the recording has written so far. */
+    private fun recordingMinutesLeft(
+        stats: com.dimadesu.lifestreamer.recording.SegmentedTsWriter.Stats?
+    ): Long? {
+        val free = stats?.freeBytes ?: return null
+        val startedAt = recordingController.statusFlow.value.startedAtMs ?: return null
+        val seconds = (System.currentTimeMillis() - startedAt) / 1000.0
+        if (seconds < 10 || stats.bytesWritten <= 0) return null
+        val bytesPerSecond = stats.bytesWritten / seconds
+        return (free / bytesPerSecond / 60).toLong()
+    }
+
+    private fun recordingNotificationText(): String {
+        val status = recordingController.statusFlow.value
+        return when (status.state) {
+            com.dimadesu.lifestreamer.recording.RecordingController.State.RECORDING -> "● REC"
+            com.dimadesu.lifestreamer.recording.RecordingController.State.ERROR ->
+                "REC error: ${status.error ?: "unknown"}"
+            else -> ""
+        }
     }
 
     private fun notificationContentFor(status: StreamStatus): NotificationContent {
@@ -1122,14 +1182,19 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
             else String.format(java.util.Locale.US, "%d kb/s", b / 1000)
         } ?: ""
 
-        val finalText = if (status == StreamStatus.STREAMING) {
+        val recordingText = recordingNotificationText()
+        val baseText = if (status == StreamStatus.STREAMING) {
             val fpsAppend = if (fpsText.isNotEmpty()) " • $fpsText" else ""
             "$content • $bitrateText$fpsAppend"
+        } else if (recordingController.isActive && status != StreamStatus.CONNECTING) {
+            getString(R.string.status_recording_live_off)
         } else content
+        val finalText = if (recordingText.isEmpty()) baseText else "$baseText • $recordingText"
 
         return NotificationContent(
             statusLabel, content, bitrateText, fpsText, finalText,
-            bitrateBps = videoBitrate, fps = fpsValue?.toFloat()
+            bitrateBps = videoBitrate, fps = fpsValue?.toFloat(),
+            recordingText = recordingText
         )
     }
 
@@ -1148,14 +1213,18 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         val muteLabel = currentMuteLabel()
         // Show Start button when not streaming and not in a transitional state
         val showStart = status == StreamStatus.NOT_STREAMING
-        // Show Stop button when streaming or attempting to connect
+        // Show Stop button when streaming or attempting to connect, or while a recording that
+        // outlived the live runs: Stop is also how the operator ends that
+        val recordingActive = recordingController.isActive
         val showStop = status == StreamStatus.STREAMING || 
                       status == StreamStatus.CONNECTING || 
-                      status == StreamStatus.STARTING
+                      status == StreamStatus.STARTING ||
+                      recordingActive
 
         val finalContentText = parts.finalText
         
-        val isFg = status == StreamStatus.STREAMING || status == StreamStatus.CONNECTING
+        val isFg = status == StreamStatus.STREAMING || status == StreamStatus.CONNECTING ||
+                recordingActive
 
         val notification = customNotificationUtils.createServiceNotification(
             title = title,

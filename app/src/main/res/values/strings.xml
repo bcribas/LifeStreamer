@@ -20,6 +20,7 @@
 
     <!-- Stream status labels -->
     <string name="status_not_streaming">Not streaming</string>
+    <string name="status_recording_live_off">Recording (live off)</string>
     <string name="status_starting">Starting...</string>
     <string name="status_connecting">Connecting...</string>
     <string name="status_streaming">Live</string>

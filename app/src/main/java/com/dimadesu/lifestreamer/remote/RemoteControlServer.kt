@@ -67,6 +67,10 @@ class RemoteControlServer(
         fun thermal(): RemoteDto.ThermalDto?
         fun power(): RemoteDto.PowerDto
         fun stream(): RemoteDto.StreamDto
+        fun recording(): RemoteDto.RecordingDto
+
+        /** @return null when accepted, otherwise why the recording cannot be turned on. */
+        fun setRecordingEnabled(enabled: Boolean): String?
 
         /** @return null when the start was accepted, otherwise why it was refused. */
         fun startStream(): String?
@@ -712,6 +716,20 @@ class RemoteControlServer(
                 respondJson(output, 202, RemoteDto.OkResponse(true))
             }
 
+            "/api/recording" -> {
+                val wanted = parse<RemoteDto.RecordingRequest>(request.body)?.enabled
+                if (wanted == null) {
+                    respondJson(output, 400, RemoteDto.OkResponse(false, "Missing enabled"))
+                } else {
+                    val refused = hooks.setRecordingEnabled(wanted)
+                    if (refused == null) {
+                        respondJson(output, 200, RemoteDto.OkResponse(true))
+                    } else {
+                        respondJson(output, 409, RemoteDto.OkResponse(false, refused))
+                    }
+                }
+            }
+
             "/api/mute" -> {
                 val wanted = parse<RemoteDto.MuteRequest>(request.body)?.muted
                 if (wanted == null) {
@@ -834,6 +852,7 @@ class RemoteControlServer(
             thermal = hooks.thermal(),
             power = hooks.power(),
             stream = hooks.stream(),
+            recording = hooks.recording(),
             backgroundColor = layout?.backgroundColor?.let(::formatColor),
             pipSources = controller.pipSourceOptions().map {
                 RemoteDto.PipSourceDto(
@@ -964,9 +983,9 @@ class RemoteControlServer(
      * two seconds, and in the state they would make every snapshot look new and rebuild the page.
      * Droppable, like state: a slow client simply sees fewer updates.
      */
-    fun broadcastStats(bitrateKbps: Int?, fps: Float?, uptimeSec: Long?) {
+    fun broadcastStats(stats: RemoteDto.StatsDto) {
         if (eventClients.isEmpty()) return
-        val payload = gson.toJson(RemoteDto.StatsDto(bitrateKbps, fps?.let { round2(it) }, uptimeSec))
+        val payload = gson.toJson(stats.copy(fps = stats.fps?.let { round2(it) }))
         runCatching {
             pushExecutor.execute {
                 eventClients.forEach { client -> client.send("stats", payload) }

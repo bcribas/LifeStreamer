@@ -119,8 +119,8 @@ object RemoteControlManager {
         server?.broadcastState()
     }
 
-    fun broadcastStats(bitrateKbps: Int?, fps: Float?, uptimeSec: Long?) {
-        server?.broadcastStats(bitrateKbps, fps, uptimeSec)
+    fun broadcastStats(stats: RemoteDto.StatsDto) {
+        server?.broadcastStats(stats)
     }
 
     fun broadcastMessage(text: String) {

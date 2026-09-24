@@ -77,6 +77,15 @@
   .st-live { background: var(--bad); }
   .st-busy { background: var(--warn); }
   .st-idle { background: #666; }
+  /* Recording sits right under the live bar: the other thing that must not stop unnoticed. */
+  #rec { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  #rec .info { flex: 1; min-width: 0; }
+  #recStatus { font-weight: 700; display: flex; align-items: center; }
+  #recMeta { font-variant-numeric: tabular-nums; }
+  #recReason { color: var(--warn); font-size: 12px; }
+  #recBtn { min-width: 116px; }
+  .st-rec { background: #e33; animation: recblink 1.2s steps(2, start) infinite; }
+  @keyframes recblink { to { visibility: hidden; } }
 
   /* An in-page dialog rather than window.confirm, which mobile browsers may suppress. */
   #confirm { position: fixed; inset: 0; background: #000b; z-index: 20; display: flex;
@@ -130,6 +139,14 @@
         <div id="liveReason"></div>
       </div>
       <button id="liveBtn" class="start">Start live</button>
+    </div>
+    <div id="rec" class="panel">
+      <div class="info">
+        <div id="recStatus"><span class="dot st-idle"></span><span>Recording off</span></div>
+        <div id="recMeta" class="muted"></div>
+        <div id="recReason"></div>
+      </div>
+      <button id="recBtn">Turn on</button>
     </div>
     <div id="thermal" class="panel" hidden></div>
     <div id="stage"><div class="grid"></div></div>
@@ -257,7 +274,10 @@ function connect() {
   events.addEventListener("stats", function (e) {
     liveStats = JSON.parse(e.data);
     liveStatsAt = Date.now();
+    recStats = liveStats.recordingBytes !== null && liveStats.recordingBytes !== undefined
+      ? liveStats : null;
     renderLiveMeta();
+    renderRecMeta();
   });
   events.addEventListener("message", function (e) {
     showStatus(JSON.parse(e.data).text, "#444");
@@ -310,6 +330,7 @@ function render(s) {
   }
 
   renderLive(s.stream);
+  renderRecording(s.recording);
   renderComposition(s);
   renderThermal(s.thermal);
   renderPresets(s.presets, s.activePresetId);
@@ -405,6 +426,75 @@ document.getElementById("liveBtn").onclick = function () {
       .then(function (yes) { if (yes) api("/api/stream/stop"); });
   } else {
     api("/api/stream/start").catch(function () {});
+  }
+};
+
+// ---- recording ----
+
+var recStats = null;
+
+var REC_STATES = {
+  OFF: { text: "Recording off", dot: "st-idle" },
+  ARMED: { text: "Recording on: starts with the live", dot: "st-idle" },
+  RECORDING: { text: "REC", dot: "st-rec" },
+  ERROR: { text: "Recording stopped", dot: "st-busy" }
+};
+
+function formatBytes(b) {
+  return b >= 1e9 ? (b / 1e9).toFixed(2) + " GB" : Math.round(b / 1e6) + " MB";
+}
+
+function renderRecording(rec) {
+  if (!rec) return;
+  var info = REC_STATES[rec.state] || REC_STATES.OFF;
+  var status = document.getElementById("recStatus");
+  status.innerHTML = "";
+  var dot = document.createElement("span");
+  dot.className = "dot " + info.dot;
+  var label = document.createElement("span");
+  var text = info.text;
+  if (rec.state === "RECORDING") {
+    text += " · " + (rec.resolution || "") + " · segment " + rec.segmentIndex;
+  }
+  label.textContent = text;
+  status.appendChild(dot);
+  status.appendChild(label);
+
+  document.getElementById("recReason").textContent = rec.error || rec.warning || "";
+
+  var btn = document.getElementById("recBtn");
+  btn.textContent = rec.enabled ? "Turn off" : "Turn on";
+  btn.className = rec.enabled ? "" : "on";
+  if (rec.state !== "RECORDING") recStats = null;
+  renderRecMeta();
+}
+
+function renderRecMeta() {
+  var el = document.getElementById("recMeta");
+  var rec = state && state.recording;
+  if (!rec || rec.state !== "RECORDING" || !recStats) { el.textContent = ""; return; }
+  var parts = [formatBytes(recStats.recordingBytes)];
+  if (recStats.recordingFreeMb !== null && recStats.recordingFreeMb !== undefined) {
+    parts.push((recStats.recordingFreeMb / 1000).toFixed(1) + " GB free");
+  }
+  if (recStats.recordingMinutesLeft !== null && recStats.recordingMinutesLeft !== undefined) {
+    var m = recStats.recordingMinutesLeft;
+    parts.push("~" + (m >= 60 ? Math.floor(m / 60) + " h " + (m % 60) + " min" : m + " min") + " left");
+  }
+  el.textContent = parts.join(" · ");
+}
+
+document.getElementById("recBtn").onclick = function () {
+  var rec = state && state.recording;
+  if (!rec) return;
+  if (!rec.enabled) {
+    // A refusal (no folder, card full) comes back as a 409 and shows through api()
+    api("/api/recording", { enabled: true }).catch(function () {});
+  } else if (rec.state === "RECORDING") {
+    confirmDialog("Stop recording?", "The live continues; only the recording stops.", "Stop recording", true)
+      .then(function (yes) { if (yes) api("/api/recording", { enabled: false }).catch(function () {}); });
+  } else {
+    api("/api/recording", { enabled: false }).catch(function () {});
   }
 };
 

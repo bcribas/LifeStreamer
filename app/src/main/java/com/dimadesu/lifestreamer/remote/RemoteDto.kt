@@ -44,7 +44,28 @@ object RemoteDto {
         val stream: StreamDto,
         /** #RRGGBB, or null when there is no composition. */
         val backgroundColor: String?,
-        val pipSources: List<PipSourceDto>
+        val pipSources: List<PipSourceDto>,
+        val recording: RecordingDto
+    )
+
+    /**
+     * Local recording. Bytes and free space change all the time, so they travel in `stats`.
+     */
+    @Keep
+    data class RecordingDto(
+        /** The function is on: it records whenever the live is. */
+        val enabled: Boolean,
+        /** OFF, ARMED (on, waiting for the live), RECORDING or ERROR. */
+        val state: String,
+        /** separate or live_copy. */
+        val mode: String,
+        val segmentIndex: Int,
+        val segmentName: String?,
+        /** Epoch ms when this recording started. */
+        val startedAtMs: Long?,
+        val resolution: String?,
+        val error: String?,
+        val warning: String?
     )
 
     /**
@@ -73,7 +94,11 @@ object RemoteDto {
         val bitrateKbps: Int?,
         val fps: Float?,
         /** Measured on the phone: the browser's clock need not agree with the phone's. */
-        val uptimeSec: Long?
+        val uptimeSec: Long?,
+        val recordingBytes: Long? = null,
+        val recordingFreeMb: Long? = null,
+        /** At the rate written so far. */
+        val recordingMinutesLeft: Long? = null
     )
 
     @Keep
@@ -195,6 +220,9 @@ object RemoteDto {
 
     @Keep
     data class MuteRequest(val muted: Boolean? = null)
+
+    @Keep
+    data class RecordingRequest(val enabled: Boolean? = null)
 
     @Keep
     data class CompositionRequest(val enabled: Boolean? = null)
