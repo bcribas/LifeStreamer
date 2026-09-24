@@ -58,25 +58,25 @@ class DataStoreRepository(
             preferences[stringPreferencesKey(context.getString(R.string.audio_encoder_key))]
                 ?: ApplicationConstants.Audio.defaultEncoder
         val startBitrate =
-            preferences[stringPreferencesKey(context.getString(R.string.audio_bitrate_key))]?.toInt()
+            preferences[stringPreferencesKey(context.getString(R.string.audio_bitrate_key))]?.toIntOrNull()
                 ?: ApplicationConstants.Audio.defaultBitrateInBps
 
         val channelConfig =
-            preferences[stringPreferencesKey(context.getString(R.string.audio_channel_config_key))]?.toInt()
+            preferences[stringPreferencesKey(context.getString(R.string.audio_channel_config_key))]?.toIntOrNull()
                 ?: ApplicationConstants.Audio.defaultChannelConfig
         // Capped here as well as in the settings, so a combination saved before the cap existed
         // (or left behind by a bitrate change) cannot reach the encoder.
         val sampleRate = LowBitrateAudio.coerceSampleRate(
             startBitrate,
             AudioConfig.getNumberOfChannels(channelConfig),
-            preferences[stringPreferencesKey(context.getString(R.string.audio_sample_rate_key))]?.toInt()
+            preferences[stringPreferencesKey(context.getString(R.string.audio_sample_rate_key))]?.toIntOrNull()
                 ?: ApplicationConstants.Audio.defaultSampleRate
         )
         val byteFormat =
-            preferences[stringPreferencesKey(context.getString(R.string.audio_byte_format_key))]?.toInt()
+            preferences[stringPreferencesKey(context.getString(R.string.audio_byte_format_key))]?.toIntOrNull()
                 ?: ApplicationConstants.Audio.defaultByteFormat
         val profile =
-            preferences[stringPreferencesKey(context.getString(R.string.audio_profile_key))]?.toInt()
+            preferences[stringPreferencesKey(context.getString(R.string.audio_profile_key))]?.toIntOrNull()
                 ?: if (mimeType == MediaFormat.MIMETYPE_AUDIO_AAC) {
                     MediaCodecInfo.CodecProfileLevel.AACObjectLC
                 } else {
@@ -112,26 +112,25 @@ class DataStoreRepository(
             ) ?: ApplicationConstants.Video.defaultBitrateInBps
 
         val resolution =
-            preferences[stringPreferencesKey(context.getString(R.string.video_resolution_key))]?.split(
-                "x"
-            )?.let { Size(it[0].toInt(), it[1].toInt()) }
+            preferences[stringPreferencesKey(context.getString(R.string.video_resolution_key))]
+                ?.let { runCatching { Size.parseSize(it) }.getOrNull() }
                 ?: ApplicationConstants.Video.defaultResolution
         val cameraFps =
-            preferences[stringPreferencesKey(context.getString(R.string.camera_fps_key))]?.toInt()
+            preferences[stringPreferencesKey(context.getString(R.string.camera_fps_key))]?.toIntOrNull()
                 ?: ApplicationConstants.Video.defaultFps
         val matchFps =
             preferences[booleanPreferencesKey(context.getString(R.string.match_fps_key))] ?: true
         val fps = if (matchFps) {
             cameraFps
         } else {
-            preferences[stringPreferencesKey(context.getString(R.string.video_fps_key))]?.toInt()
+            preferences[stringPreferencesKey(context.getString(R.string.video_fps_key))]?.toIntOrNull()
                 ?: ApplicationConstants.Video.defaultFps
         }
         val profile =
-            preferences[stringPreferencesKey(context.getString(R.string.video_profile_key))]?.toInt()
+            preferences[stringPreferencesKey(context.getString(R.string.video_profile_key))]?.toIntOrNull()
                 ?: VideoConfig.getBestProfile(mimeType)
         val level =
-            preferences[stringPreferencesKey(context.getString(R.string.video_level_key))]?.toInt()
+            preferences[stringPreferencesKey(context.getString(R.string.video_level_key))]?.toIntOrNull()
                 ?: VideoConfig.getBestLevel(mimeType, profile)
         VideoConfig(
             mimeType = mimeType,
@@ -165,14 +164,14 @@ class DataStoreRepository(
     /** The endpoint type alone, without building a descriptor (which, for files, inserts one). */
     val endpointTypeFlow: Flow<EndpointType> = dataStore.data.map { preferences ->
         EndpointType.fromId(
-            preferences[stringPreferencesKey(context.getString(R.string.endpoint_type_key))]?.toInt()
+            preferences[stringPreferencesKey(context.getString(R.string.endpoint_type_key))]?.toIntOrNull()
                 ?: EndpointType.SRT.id
         )
     }.distinctUntilChanged()
 
     val endpointDescriptorFlow: Flow<MediaDescriptor> = dataStore.data.map { preferences ->
         val endpointTypeId =
-            preferences[stringPreferencesKey(context.getString(R.string.endpoint_type_key))]?.toInt()
+            preferences[stringPreferencesKey(context.getString(R.string.endpoint_type_key))]?.toIntOrNull()
                 ?: EndpointType.SRT.id
         when (val endpointType = EndpointType.fromId(endpointTypeId)) {
             EndpointType.TS_FILE,
@@ -181,8 +180,10 @@ class DataStoreRepository(
             EndpointType.WEBM_FILE,
             EndpointType.OGG_FILE,
             EndpointType.THREEGP_FILE -> {
+                // file_name_key is what the settings write; file_endpoint_key is their category
                 val filename =
-                    preferences[stringPreferencesKey(context.getString(R.string.file_endpoint_key))]
+                    preferences[stringPreferencesKey(context.getString(R.string.file_name_key))]
+                        ?.takeIf { it.isNotBlank() }
                         ?: "StreamPack"
                 context.createVideoContentUri(
                     filename.appendIfNotEndsWith(FileExtension.fromEndpointType(endpointType).extension)
@@ -194,8 +195,8 @@ class DataStoreRepository(
                     preferences[stringPreferencesKey(context.getString(R.string.srt_server_ip_key))]
                         ?: context.getString(R.string.default_srt_server_url)
                 val port =
-                    preferences[stringPreferencesKey(context.getString(R.string.srt_server_port_key))]?.toInt()
-                        ?: 9998
+                    preferences[stringPreferencesKey(context.getString(R.string.srt_server_port_key))]?.toIntOrNull()
+                        ?: context.getString(R.string.default_srt_server_port).toInt()
                 val streamId =
                     preferences[stringPreferencesKey(context.getString(R.string.srt_server_stream_id_key))]
                         ?: ""
@@ -272,7 +273,7 @@ class DataStoreRepository(
 
     val srtlaConfigFlow: Flow<SrtlaConfig?> = dataStore.data.map { preferences ->
         val endpointTypeId =
-            preferences[stringPreferencesKey(context.getString(R.string.endpoint_type_key))]?.toInt()
+            preferences[stringPreferencesKey(context.getString(R.string.endpoint_type_key))]?.toIntOrNull()
                 ?: EndpointType.SRT.id
         if (EndpointType.fromId(endpointTypeId) != EndpointType.SRTLA) return@map null
         SrtlaConfig(
@@ -291,7 +292,7 @@ class DataStoreRepository(
     val moblinkConfigFlow: Flow<MoblinkConfig?> = dataStore.data.map { preferences ->
         // Moblink only makes sense when Bond Bunny SRTLA bonding is active
         val endpointTypeId =
-            preferences[stringPreferencesKey(context.getString(R.string.endpoint_type_key))]?.toInt()
+            preferences[stringPreferencesKey(context.getString(R.string.endpoint_type_key))]?.toIntOrNull()
                 ?: EndpointType.SRT.id
         if (EndpointType.fromId(endpointTypeId) != EndpointType.SRTLA) return@map null
         val enabled = preferences[booleanPreferencesKey(context.getString(R.string.moblink_enabled_key))] ?: false
@@ -528,7 +529,7 @@ class DataStoreRepository(
     val bitrateRegulatorConfigFlow: Flow<BitrateRegulatorConfig?> =
         dataStore.data.map { preferences ->
             val endpointTypeId =
-                preferences[stringPreferencesKey(context.getString(R.string.endpoint_type_key))]?.toInt()
+                preferences[stringPreferencesKey(context.getString(R.string.endpoint_type_key))]?.toIntOrNull()
                     ?: EndpointType.SRT.id
             val endpointType = EndpointType.fromId(endpointTypeId)
 
@@ -556,7 +557,7 @@ class DataStoreRepository(
                             else -> return@map null
                         }
                     )
-                )]?.toInt()
+                )]
                     ?.times(1000)
                     ?: 300000
             val videoMaxBitrate =
@@ -568,7 +569,7 @@ class DataStoreRepository(
                             else -> return@map null
                         }
                     )
-                )]?.toInt()
+                )]
                     ?.times(1000)
                     ?: 10000000
             // The minimum's fallback is 300 kb/s, above the lowest target: Range() throws when
@@ -585,6 +586,8 @@ class DataStoreRepository(
         val stored = preferences[stringPreferencesKey(context.getString(R.string.srt_server_moblin_regulator_mode_key))]
             ?: context.getString(R.string.srt_server_moblin_regulator_mode_value_belabox)
         when (stored) {
+            // "fast" used to fall through to BELABOX, so Moblin's fast mode was unreachable
+            context.getString(R.string.srt_server_moblin_regulator_mode_value_fast) -> com.dimadesu.lifestreamer.bitrate.RegulatorMode.MOBLIN_FAST
             context.getString(R.string.srt_server_moblin_regulator_mode_value_slow) -> com.dimadesu.lifestreamer.bitrate.RegulatorMode.MOBLIN_SLOW
             context.getString(R.string.srt_server_moblin_regulator_mode_value_belabox) -> com.dimadesu.lifestreamer.bitrate.RegulatorMode.BELABOX
             else -> com.dimadesu.lifestreamer.bitrate.RegulatorMode.BELABOX

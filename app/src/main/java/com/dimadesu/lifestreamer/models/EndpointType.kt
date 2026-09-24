@@ -30,6 +30,7 @@ enum class EndpointType(val id: Int, @param:StringRes val labelResId: Int) {
     THREEGP_FILE(7, R.string.to_3gp_file);
 
     companion object {
-        fun fromId(id: Int): EndpointType = entries.first { it.id == id }
+        /** The type with [id]; SRT, the default, for an id no type has (a malformed stored value). */
+        fun fromId(id: Int): EndpointType = entries.firstOrNull { it.id == id } ?: SRT
     }
 }
