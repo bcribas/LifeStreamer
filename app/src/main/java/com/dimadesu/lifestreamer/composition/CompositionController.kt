@@ -490,6 +490,9 @@ class CompositionController(
             else _placeholders.value + (layerId to reason)
     }
 
+    /** The player of the 🔊 layer when it is an RTMP source: what the audio monitor plays. */
+    fun primaryFeedPlayer(): ExoPlayer? = layout?.primaryLayer?.id?.let { feeds[it]?.player }
+
     /** Only the 🔊 layer's RTMP feed keeps its sound; see [RtmpLayerFeed.setAudioEnabled]. */
     private fun applyFeedAudio() {
         val primary = layout?.primaryLayer?.id

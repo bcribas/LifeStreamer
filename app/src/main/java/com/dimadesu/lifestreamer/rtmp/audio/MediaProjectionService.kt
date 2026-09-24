@@ -35,6 +35,14 @@ class MediaProjectionService : Service() {
         @Volatile
         var isRunning: Boolean = false
             private set
+
+        private val _projection = kotlinx.coroutines.flow.MutableStateFlow<MediaProjection?>(null)
+
+        /**
+         * The grant held now, for whatever captures with it (the service follows the live's
+         * sound with it while the app is closed). A new grant replaces, and ends, the last one.
+         */
+        val projection: kotlinx.coroutines.flow.StateFlow<MediaProjection?> = _projection
     }
 
     inner class LocalBinder : Binder() {
@@ -82,6 +90,7 @@ class MediaProjectionService : Service() {
         isRunning = false
         mediaProjection?.stop()
         mediaProjection = null
+        _projection.value = null
         super.onDestroy()
     }
 
@@ -107,6 +116,7 @@ class MediaProjectionService : Service() {
                 getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
 
             mediaProjection = mediaProjectionManager.getMediaProjection(resultCode, resultData)
+            _projection.value = mediaProjection
             Log.i(TAG, "MediaProjection created successfully in foreground service")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to create MediaProjection in service: ${e.message}", e)
@@ -150,5 +160,6 @@ class MediaProjectionService : Service() {
         Log.i(TAG, "Clearing MediaProjection from service")
         mediaProjection?.stop()
         mediaProjection = null
+        _projection.value = null
     }
 }

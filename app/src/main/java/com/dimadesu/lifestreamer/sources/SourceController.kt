@@ -128,6 +128,10 @@ class SourceController(
         }
     }
 
+    /** Where the composition's sound comes from now (see the audio follower); null outside one. */
+    @Volatile
+    var audioRoute: () -> com.dimadesu.lifestreamer.audio.AudioRoute? = { null }
+
     /** The last RTMP index put on the whole picture, to name it with the app closed. */
     @Volatile
     var lastRtmp: Int? = null

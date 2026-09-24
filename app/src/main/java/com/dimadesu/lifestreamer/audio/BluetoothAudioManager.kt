@@ -216,6 +216,14 @@ class BluetoothAudioManager(
             return
         }
 
+        // A captured sound (an RTMP source's, or the phone's) is not a microphone's to replace:
+        // switching to Bluetooth here dropped an RTMP source's sound when a live started
+        val captured = (streamerInstance as? IWithAudioSource)?.audioInput?.sourceFlow?.value
+        if (captured is io.github.thibaultbee.streampack.core.elements.sources.IMediaProjectionSource) {
+            Log.i(TAG, "SCO orchestration skipped: the sound is captured, not from a microphone")
+            return
+        }
+
         // Ensure permission FIRST - on Android 12+ we need BLUETOOTH_CONNECT to detect devices
         if (!scoOrchestrator.ensurePermission()) {
             Log.w(TAG, "SCO orchestration: BLUETOOTH_CONNECT permission missing - requesting")

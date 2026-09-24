@@ -25,7 +25,8 @@ import io.github.thibaultbee.streampack.core.elements.sources.IMediaProjectionSo
 @RequiresApi(Build.VERSION_CODES.Q)
 class MediaProjectionAudioSource(
     override val mediaProjection: MediaProjection,  // Make public for factory comparison
-    private val captureFullPhone: Boolean = false
+    /** Everything the phone plays (SYS AUDIO), rather than the app's own sound only. */
+    val captureFullPhone: Boolean = false
 ) : AudioRecordSource(), Releasable, IMediaProjectionSource {
 
     // let AudioRecordSource.configure handle buffer sizing and processor setup

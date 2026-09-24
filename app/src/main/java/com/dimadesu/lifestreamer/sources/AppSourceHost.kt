@@ -31,4 +31,10 @@ interface AppSourceHost : com.dimadesu.lifestreamer.composition.ExternalLayerSou
      * Returns at once; the layer takes the source when it is ready.
      */
     fun prepareLayerSource(layerId: String, choice: SourceChoice)
+
+    /**
+     * Asks on the phone for screen capture, which the live's sound needs (an RTMP layer's sound,
+     * or the phone's). Returns at once; the sound follows when it is accepted.
+     */
+    fun askCaptureForSound()
 }

@@ -184,6 +184,25 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
     }
 
     /**
+     * The composition's sound follows its 🔊 layer: an RTMP layer's own sound, else the
+     * microphone (or the phone's sound with SYS AUDIO). Here, so it follows with the app closed.
+     */
+    val audioFollower by lazy {
+        com.dimadesu.lifestreamer.audio.AudioFollower(
+            scope = serviceScope,
+            composition = compositionController,
+            sources = sourceController,
+            videoSourceFlow = { videoInputSourceFlow() },
+            streamer = { streamer as? io.github.thibaultbee.streampack.core.interfaces.IWithAudioSource },
+            useMic = {
+                (streamer as? io.github.thibaultbee.streampack.core.interfaces.IWithAudioSource)
+                    ?.setAudioSource(com.dimadesu.lifestreamer.audio.ConditionalAudioSourceFactory())
+                triggerBluetoothMicActivation()
+            }
+        ).also { follower -> sourceController.audioRoute = { follower.route.value } }
+    }
+
+    /**
      * A small JPEG of what goes out, for the remote page, taken only while a page asks. When the
      * phone is SEVERE it slows to one frame every two seconds (the page is then the only view, the
      * phone's own preview being off), and it pauses when CRITICAL.
@@ -844,6 +863,10 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         }
         serviceScope.launch {
             sourceController.changes.collect { RemoteControlManager.broadcastState() }
+        }
+        serviceScope.launch {
+            audioFollower.start()
+            audioFollower.route.collect { RemoteControlManager.broadcastState() }
         }
         serviceScope.launch {
             // A manual exposure must fit in a frame, so the cameras' frame rate bounds it
@@ -2341,6 +2364,7 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         fun compositionController() = this@CameraStreamerService.compositionController
         fun cameraControls() = this@CameraStreamerService.cameraControls
         fun sourceController() = this@CameraStreamerService.sourceController
+        fun audioFollower() = this@CameraStreamerService.audioFollower
 
         fun thermalStateFlow() = this@CameraStreamerService.thermalMonitor.stateFlow
 

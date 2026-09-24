@@ -490,6 +490,7 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
             Log.i(TAG, "BT mic on - turning off SYS AUDIO (mutual exclusivity)")
             _useSystemAudioForCamera = false
             useSystemAudioForCameraLiveData.postValue(false)
+            serviceBinder?.audioFollower()?.systemAudio = false
         }
 
         _useBluetoothMic.postValue(enabled)
@@ -665,6 +666,7 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
     private fun doToggleSystemAudioForCamera() {
         _useSystemAudioForCamera = !_useSystemAudioForCamera
         useSystemAudioForCameraLiveData.postValue(_useSystemAudioForCamera)
+        serviceBinder?.audioFollower()?.systemAudio = _useSystemAudioForCamera
         Log.i(TAG, "System audio for camera toggled: $_useSystemAudioForCamera")
 
         // Mutual exclusivity: enabling SYS AUDIO turns off BT mic
@@ -1141,6 +1143,8 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
     private suspend fun setAudioSourceBasedOnVideoSource() {
         val currentStreamer = serviceStreamer ?: return
         val currentVideoSource = currentStreamer.videoInput?.sourceFlow?.value
+        // In a composition the sound follows the 🔊 layer, from the service (AudioFollower)
+        if (currentVideoSource is ICompositeVideoSource) return
         // UVC bitmap fallback keeps mic audio — only RTMP (live or its bitmap fallback) uses MediaProjection.
         val isUvcBitmapFallback = currentVideoSource is IBitmapSource && (_userToggledUvc.value == true)
         val isRtmpOrBitmap = currentVideoSource is RTMPVideoSource || (currentVideoSource is IBitmapSource && !isUvcBitmapFallback)
@@ -1413,6 +1417,12 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                             // The page switches sources through this screen while it is alive, and
                             // the screen and USB layers need grants only this screen can ask for
                             binder.sourceController().host = this@PreviewViewModel
+                            // SYS AUDIO outlives this screen in the service, which follows the
+                            // composition's sound with it: the toggle shows what is in effect
+                            if (binder.audioFollower().systemAudio && !_useSystemAudioForCamera) {
+                                _useSystemAudioForCamera = true
+                                useSystemAudioForCameraLiveData.postValue(true)
+                            }
 
                             // The buttons, sliders and panel follow the cameras' controls,
                             // whoever changed them (the remote page too)
@@ -3067,8 +3077,23 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
     private fun applyMonitorAudioState() {
         val videoSource = serviceStreamer?.videoInput?.sourceFlow?.value
         val audioSource = serviceStreamer?.audioInput?.sourceFlow?.value
-        
+        // In a composition whose sound is its 🔊 layer's RTMP source, that player is what to hear
+        val layerPlayer = (videoSource as? ICompositeVideoSource)
+            ?.let { compositionController?.primaryFeedPlayer() }
+            ?.takeIf { audioSource is IMediaProjectionSource }
+        if (monitoredLayerPlayer !== layerPlayer) {
+            setLayerPlayerVolume(monitoredLayerPlayer, 0f)
+            monitoredLayerPlayer = null
+        }
+
         when {
+            layerPlayer != null -> {
+                setLayerPlayerVolume(layerPlayer, 1f)
+                monitoredLayerPlayer = layerPlayer
+                service?.stopAudioPassthrough()
+                Log.i(TAG, "Audio monitor ON - the audio layer's RTMP source")
+            }
+
             // RTMP source - monitor ExoPlayer audio
             videoSource is RTMPVideoSource -> {
                 currentRtmpPlayer?.let { player ->
@@ -3112,6 +3137,8 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
      * Stop all audio monitoring
      */
     private fun stopAllMonitoring() {
+        setLayerPlayerVolume(monitoredLayerPlayer, 0f)
+        monitoredLayerPlayer = null
         currentRtmpPlayer?.let { player ->
             android.os.Handler(android.os.Looper.getMainLooper()).post {
                 try {
@@ -4428,6 +4455,35 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
 
     // region the layers only this screen can build (USB camera, screen capture)
 
+    override fun askCaptureForSound() {
+        viewModelScope.launch {
+            if (usableProjection() != null || com.dimadesu.lifestreamer.rtmp.audio.MediaProjectionService.projection.value != null) return@launch
+            // What the sound is for does not matter to the grant; the pending text says what it is
+            askOnPhone(
+                PendingSource(null, com.dimadesu.lifestreamer.sources.SourceChoice.TestImage, forSound = true),
+                com.dimadesu.lifestreamer.sources.SourceRules.ACCEPT_CAPTURE
+            )
+        }
+    }
+
+    /** Asks for screen capture for the composition's sound; the service's follower does the rest. */
+    private fun requestCaptureForSound(
+        pending: PendingSource,
+        launcher: androidx.activity.result.ActivityResultLauncher<Intent>,
+    ) {
+        waitOnPhone(pending, com.dimadesu.lifestreamer.sources.SourceRules.ACCEPT_CAPTURE)
+        mediaProjectionHelper.requestProjection(launcher) { projection ->
+            if (projection != null) {
+                startupMediaProjection = projection
+                Log.i(TAG, "MediaProjection granted for the composition's sound")
+            } else {
+                Log.w(TAG, "MediaProjection denied for the composition's sound")
+                stopWaitingOnPhone()
+                _streamerErrorLiveData.postValue("Screen capture refused - the sound stays on the microphone")
+            }
+        }
+    }
+
     override fun prepareLayerSource(layerId: String, choice: com.dimadesu.lifestreamer.sources.SourceChoice) {
         viewModelScope.launch { prepareLayer(PendingSource(layerId, choice), launcher = null) }
     }
@@ -4784,6 +4840,30 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                 publishCompositionLayers(compositionController?.layout ?: return@collect)
             }
         }
+
+        // The monitor plays the 🔊 layer's RTMP source: again when that layer or its player changes
+        monitorFollowJob?.cancel()
+        monitorFollowJob = viewModelScope.launch {
+            val controller = compositionController ?: return@launch
+            kotlinx.coroutines.flow.combine(
+                composite.layoutFlow.map { it.primaryLayerId }.distinctUntilChanged(),
+                controller.sourcesVersion
+            ) { _, _ -> controller.primaryFeedPlayer() }
+                .distinctUntilChanged()
+                .collect { if (_isMonitorAudioOn.value == true) applyMonitorAudioState() }
+        }
+    }
+
+    private var monitorFollowJob: Job? = null
+
+    /** The composition layer's RTMP player the monitor made audible, to mute when it moves on. */
+    private var monitoredLayerPlayer: androidx.media3.exoplayer.ExoPlayer? = null
+
+    private fun setLayerPlayerVolume(player: androidx.media3.exoplayer.ExoPlayer?, volume: Float) {
+        player ?: return
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            runCatching { player.volume = volume }
+        }
     }
 
     private var layersInvalidatedJob: Job? = null
@@ -4907,6 +4987,8 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
             _compositionCameraIds.postValue(emptySet())
             layoutObserverJob?.cancel()
             layoutObserverJob = null
+            monitorFollowJob?.cancel()
+            monitorFollowJob = null
             if (_isMonitorAudioOn.value == true) {
                 viewModelScope.launch { applyMonitorAudioState() }
             }
@@ -4967,7 +5049,12 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
      * A source asked for that waits for a permission on the phone: for the whole picture when
      * [layerId] is null, else for that layer of the composition.
      */
-    data class PendingSource(val layerId: String?, val choice: com.dimadesu.lifestreamer.sources.SourceChoice)
+    data class PendingSource(
+        val layerId: String?,
+        val choice: com.dimadesu.lifestreamer.sources.SourceChoice,
+        /** Only a capture grant, for the composition's sound. */
+        val forSound: Boolean = false,
+    )
 
     /** A switch asked for (by the page, or for a layer) that needs this screen's launcher. */
     private val _pendingSourceChoice = kotlinx.coroutines.flow.MutableStateFlow<PendingSource?>(null)
@@ -4987,8 +5074,11 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
         val pending = _pendingSourceChoice.value ?: return
         _pendingSourceChoice.value = null
         viewModelScope.launch {
-            if (pending.layerId == null) performTopLevel(pending.choice, launcher)
-            else prepareLayer(pending, launcher)
+            when {
+                pending.forSound -> requestCaptureForSound(pending, launcher)
+                pending.layerId == null -> performTopLevel(pending.choice, launcher)
+                else -> prepareLayer(pending, launcher)
+            }
         }
     }
 
@@ -5074,7 +5164,7 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
             } != null
             if (!done) {
                 if (_pendingSourceChoice.value == pending) _pendingSourceChoice.value = null
-                val name = sourceController?.label(pending.choice) ?: pending.choice.key
+                val name = if (pending.forSound) "the sound" else sourceController?.label(pending.choice) ?: pending.choice.key
                 _streamerErrorLiveData.postValue("Nothing was accepted on the phone for $name")
             }
             sourceController?.setPending(null)
@@ -5091,6 +5181,10 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
 
     /** Whether what [pending] asked for is on (or no longer wanted, for a layer moved on). */
     private fun isInPlace(pending: PendingSource): Boolean {
+        if (pending.forSound) {
+            return com.dimadesu.lifestreamer.rtmp.audio.MediaProjectionService.projection.value != null ||
+                    activeComposite() == null
+        }
         val layerId = pending.layerId ?: return topLevelChoice == pending.choice
         val controller = compositionController ?: return true
         if (activeComposite() == null || controller.layerChoices.value[layerId] != pending.choice) return true
@@ -5840,7 +5934,9 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                 // When BT, MP, or RTMP is active, the preference is saved and will apply next time
                 // ConditionalAudioSourceFactory is used (e.g. after SYS AUDIO is toggled off).
                 val btActive = _useBluetoothMic.value == true
-                val sysAudioActive = _useSystemAudioForCamera
+                // A composition's captured sound (its 🔊 layer's RTMP source) counts as SYS AUDIO here
+                val sysAudioActive = _useSystemAudioForCamera ||
+                        serviceStreamer?.audioInput?.sourceFlow?.value is IMediaProjectionSource
                 val rtmpActive = _activeRtmpIndex.value != null
                 if (btActive || sysAudioActive || rtmpActive) {
                     Log.i(TAG, "Audio source preference saved but not applied — " +

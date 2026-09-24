@@ -62,7 +62,12 @@ object RemoteDto {
         val appOpen: Boolean,
         /** A permission the phone is asking for, to be accepted there; null when none. */
         val pending: String?,
-        val options: List<SourceOptionDto>
+        val options: List<SourceOptionDto>,
+        /**
+         * Where a composition's sound comes from: "mic", "rtmp" (the 🔊 layer's RTMP source) or
+         * "phone" (SYS AUDIO); null without a composition.
+         */
+        val audio: String? = null
     )
 
     /** One source to choose: [key] is what /api/source takes. */

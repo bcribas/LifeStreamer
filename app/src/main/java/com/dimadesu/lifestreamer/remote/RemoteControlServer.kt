@@ -990,7 +990,13 @@ class RemoteControlServer(
         current = sources.currentTopLevel()?.key,
         appOpen = sources.host != null,
         pending = sources.pending,
-        options = sources.topLevelOptions().map(::optionDto)
+        options = sources.topLevelOptions().map(::optionDto),
+        audio = when (sources.audioRoute()) {
+            com.dimadesu.lifestreamer.audio.AudioRoute.MIC -> "mic"
+            com.dimadesu.lifestreamer.audio.AudioRoute.APP_AUDIO -> "rtmp"
+            com.dimadesu.lifestreamer.audio.AudioRoute.PHONE_AUDIO -> "phone"
+            null -> null
+        }
     )
 
     private fun optionDto(option: SourceController.Option) = RemoteDto.SourceOptionDto(
