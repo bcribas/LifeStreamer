@@ -72,7 +72,7 @@ class Camera2Backend(val cameraSource: ICameraSource) : CameraBackend {
         val locks = plan.aeLock || plan.awbLock
         write(plan, locks = !(settle && locks))
         if (settle && locks) {
-            waitForConvergence()
+            waitForConvergence(ae = plan.aeLock, awb = plan.awbLock)
             if (isActiveFlow.value) write(plan, locks = true)
         }
         if (!isActiveFlow.value) return
@@ -166,14 +166,15 @@ class Camera2Backend(val cameraSource: ICameraSource) : CameraBackend {
         settings.applyRepeatingSession()
     }
 
-    private suspend fun waitForConvergence() {
+    /** Until what is about to be locked has settled; only that, as the other may keep searching. */
+    private suspend fun waitForConvergence(ae: Boolean, awb: Boolean) {
         withTimeoutOrNull(SETTLE_TIMEOUT_MS) {
             settings.captureResultFlow.first { result ->
-                val ae = result[CaptureResult.CONTROL_AE_STATE]
-                val awb = result[CaptureResult.CONTROL_AWB_STATE]
-                (ae == null || ae == CameraMetadata.CONTROL_AE_STATE_CONVERGED ||
-                        ae == CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED) &&
-                        (awb == null || awb == CameraMetadata.CONTROL_AWB_STATE_CONVERGED)
+                val aeState = result[CaptureResult.CONTROL_AE_STATE]
+                val awbState = result[CaptureResult.CONTROL_AWB_STATE]
+                (!ae || aeState == null || aeState == CameraMetadata.CONTROL_AE_STATE_CONVERGED ||
+                        aeState == CameraMetadata.CONTROL_AE_STATE_FLASH_REQUIRED) &&
+                        (!awb || awbState == null || awbState == CameraMetadata.CONTROL_AWB_STATE_CONVERGED)
             }
         } ?: Log.d(TAG, "Camera $cameraId did not settle before locking")
     }
@@ -182,7 +183,7 @@ class Camera2Backend(val cameraSource: ICameraSource) : CameraBackend {
         private const val TAG = "CameraControls"
         private const val READ_TIMEOUT_MS = 500L
         private const val ZOOM_TIMEOUT_MS = 1_000L
-        private const val SETTLE_TIMEOUT_MS = 1_500L
+        private const val SETTLE_TIMEOUT_MS = 3_000L
         private const val TRIGGER_TIMEOUT_MS = 1_000L
 
         fun readCaps(c: CameraCharacteristics, zoomRange: Range<Float>): Camera2Caps {
