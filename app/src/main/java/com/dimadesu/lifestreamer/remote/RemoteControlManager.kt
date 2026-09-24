@@ -77,6 +77,7 @@ object RemoteControlManager {
     fun start(
         context: Context,
         controller: CompositionController,
+        cameraControls: com.dimadesu.lifestreamer.camera.CameraControlManager,
         port: Int,
         pin: String,
         hooks: RemoteControlServer.Hooks
@@ -87,7 +88,7 @@ object RemoteControlManager {
         }
         stop()
 
-        val instance = RemoteControlServer(context.applicationContext, port, controller, hooks)
+        val instance = RemoteControlServer(context.applicationContext, port, controller, cameraControls, hooks)
         instance.auth.pin = pin
         lastError = null
 

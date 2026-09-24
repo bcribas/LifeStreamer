@@ -59,6 +59,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
 import com.dimadesu.lifestreamer.audio.BluetoothAudioSource
 import com.dimadesu.lifestreamer.audio.ScoOrchestrator
 
@@ -134,6 +135,29 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                 val url = storageRepository.rtmpSourceUrlFlow(1).first()
                 if (url.isBlank()) null
                 else url to storageRepository.rtmpSourceBufferForPlaybackMsFlow.first()
+            }
+        )
+    }
+
+    /**
+     * Each camera's controls (focus, exposure, white balance, zoom...), for the phone and the
+     * remote page alike, remembered per camera and re-applied whenever one turns on. Like the
+     * controller, it reads the source through lambdas and never touches the lazy streamer early.
+     */
+    val cameraControls by lazy {
+        com.dimadesu.lifestreamer.camera.CameraControlManager(
+            context = this,
+            parentScope = serviceScope,
+            videoSourceFlow = {
+                runCatching { (streamer as? IWithVideoSource)?.videoInput?.sourceFlow }.getOrNull()
+            },
+            videoSource = {
+                (streamer as? IWithVideoSource)?.videoInput?.sourceFlow?.value
+            },
+            composition = compositionController,
+            fps = {
+                (streamer as? IVideoSingleStreamer)?.videoConfigFlow?.value
+                    ?.let { it.cameraFps ?: it.fps } ?: 30
             }
         )
     }
@@ -751,6 +775,7 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                 RemoteControlManager.start(
                     this@CameraStreamerService,
                     compositionController,
+                    cameraControls,
                     config.port,
                     pin,
                     remoteControlHooks
@@ -768,6 +793,16 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         // the page could not tell an applied command from an ignored one.
         serviceScope.launch {
             compositionController.layersInvalidated.collect { RemoteControlManager.broadcastState() }
+        }
+        serviceScope.launch {
+            cameraControls.start()
+            cameraControls.state.collect { RemoteControlManager.broadcastState() }
+        }
+        serviceScope.launch {
+            // A manual exposure must fit in a frame, so the cameras' frame rate bounds it
+            (streamer as? IVideoSingleStreamer)?.videoConfigFlow
+                ?.map { it?.cameraFps ?: it?.fps }?.distinctUntilChanged()?.drop(1)
+                ?.collect { cameraControls.onFrameRateChanged() }
         }
         serviceScope.launch {
             isMutedFlow.collect { RemoteControlManager.broadcastState() }
@@ -820,12 +855,7 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         }
         serviceScope.launch {
             runCatching { streamer.isStreamingFlow }.getOrNull()
-                ?.collect {
-                    // With the preview off -- the normal state when mounted -- a composition's
-                    // cameras only run while live, so this is when zoom first becomes readable.
-                    compositionController.refreshZoomAsync()
-                    RemoteControlManager.broadcastState()
-                }
+                ?.collect { RemoteControlManager.broadcastState() }
         }
         // The composition itself can be replaced (COMPOSE on/off), so follow the source and then
         // its layout rather than binding once to a layout that may not exist yet.
@@ -834,13 +864,8 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                 // Failure handling for the second layer, whoever built the composition: with the
                 // app's screen gone it used to go black when its source died.
                 (source as? ICompositeVideoSource)?.let { compositionController.onCompositionAppeared(it) }
-                // The zoom cache is refreshed here rather than while serialising state: doing it
-                // there fed a loop (refresh -> layersInvalidated -> push -> refresh) that never
-                // settled while the value jittered.
-                compositionController.refreshZoomAsync()
                 RemoteControlManager.broadcastState()
                 (source as? ICompositeVideoSource)?.layoutFlow?.collect {
-                    compositionController.refreshZoomAsync()
                     RemoteControlManager.broadcastState()
                 }
             }
@@ -2266,6 +2291,7 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         fun isMutedFlow() = this@CameraStreamerService.isMutedFlow
 
         fun compositionController() = this@CameraStreamerService.compositionController
+        fun cameraControls() = this@CameraStreamerService.cameraControls
 
         fun thermalStateFlow() = this@CameraStreamerService.thermalMonitor.stateFlow
 

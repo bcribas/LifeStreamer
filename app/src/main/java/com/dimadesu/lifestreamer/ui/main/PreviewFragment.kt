@@ -980,7 +980,7 @@ class PreviewFragment : Fragment(R.layout.main_fragment) {
         // The listener is dispatched on the main thread (PreviewView wraps it with post{}).
         preview.setZoomListener(object : CameraSettings.Zoom.OnZoomChangedListener {
             override fun onZoomChanged(zoomRatio: Float) {
-                previewViewModel.onZoomRationOnPinchChanged()
+                previewViewModel.onZoomRationOnPinchChanged(zoomRatio)
             }
         })
 

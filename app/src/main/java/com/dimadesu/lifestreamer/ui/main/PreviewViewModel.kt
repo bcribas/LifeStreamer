@@ -379,17 +379,37 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
     private val _isCompositeSource = MutableLiveData<Boolean>(false)
 
     /**
-     * Camera settings.
+     * Each camera's controls live in the service, shared with the remote page and remembered per
+     * camera; the quick buttons act on the selected layer's camera, or on the one camera.
      */
-    /**
-     * Zoom, exposure and focus for whatever camera is in play.
-     *
-     * This used to cast the top-level source to [ICameraSource], which is null the moment a
-     * composition is active — so these controls were dead on the device whenever COMPOSE was on.
-     * The controller resolves the selected layer's child instead.
-     */
-    val cameraSettings: CameraSettings?
-        get() = compositionController?.cameraSettingsForLayer(_selectedCompositionLayerId.value)
+    private val cameraControls: com.dimadesu.lifestreamer.camera.CameraControlManager?
+        get() = serviceBinder?.cameraControls()
+
+    /** The camera the quick buttons act on, or null when that layer is not a camera. */
+    private fun selectedCameraTarget(): com.dimadesu.lifestreamer.camera.CameraControlManager.CameraTargetState? {
+        val state = cameraControls?.state?.value ?: return null
+        if (_isCompositeSource.value == true) {
+            return state.target(_selectedCompositionLayerId.value ?: CompositionLayers.MAIN)
+        }
+        return state.targets.firstOrNull()
+    }
+
+    private fun selectedControl(key: String) = selectedCameraTarget()?.controls?.firstOrNull { it.key == key }
+
+    /** Sets a control of the selected camera; [onDone] gets the camera's state after it. */
+    private fun setCameraControl(
+        key: String,
+        value: Any?,
+        onDone: (com.dimadesu.lifestreamer.camera.CameraControlManager.CameraTargetState?) -> Unit = {}
+    ) {
+        val controls = cameraControls ?: return
+        val target = selectedCameraTarget() ?: return
+        viewModelScope.launch {
+            controls.set(target.id, key, value)
+                .onSuccess { onDone(controls.state.value.target(target.id)) }
+                .onFailure { _toastMessageLiveData.postValue(it.message) }
+        }
+    }
 
     val requiredPermissions: List<String>
         get() {
@@ -1381,6 +1401,16 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
 
                             // Screen and USB layers need grants that only this screen can ask for.
                             binder.compositionController().externalPipProvider = this@PreviewViewModel
+
+                            // The sliders follow the cameras' controls, whoever changed them
+                            // (the remote page too)
+                            viewModelScope.launch {
+                                binder.cameraControls().state.collect {
+                                    notifyPropertyChanged(BR.exposureCompensation)
+                                    notifyPropertyChanged(BR.zoomRatio)
+                                    notifyPropertyChanged(BR.lensDistance)
+                                }
+                            }
                             // The preview may already have been set before the service was
                             // bound (mounted mode does it at start-up), and a report made then
                             // went nowhere: the page showed "Preview on" with the preview off.
@@ -1835,8 +1865,9 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
         }
     }
 
-    fun onZoomRationOnPinchChanged() {
-        notifyPropertyChanged(BR.zoomRatio)
+    /** A pinch on the preview zoomed the camera itself: remember it, so it is not undone. */
+    fun onZoomRationOnPinchChanged(zoomRatio: Float) {
+        setCameraControl(com.dimadesu.lifestreamer.camera.ControlKeys.ZOOM, zoomRatio)
     }
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
@@ -5046,54 +5077,34 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
 
     val isFlashAvailable = MutableLiveData(false)
     fun toggleFlash() {
-        cameraSettings?.let {
-            viewModelScope.launch {
-                try {
-                    val isCurrentlyEnabled = it.flash.isEnable
-                    it.flash.setIsEnable(!isCurrentlyEnabled)
-                    
-                    // Show toast with flash state
-                    val message = if (!isCurrentlyEnabled) "Torch: On" else "Torch: Off"
-                    _toastMessageLiveData.postValue(message)
-                } catch (t: Throwable) {
-                    Log.w(TAG, "toggleFlash failed (camera session may be closed): ${t.message}")
-                }
-            }
-        } ?: Log.e(TAG, "Camera settings is not accessible")
+        val on = selectedCameraTarget()?.runtime?.torch != true
+        setCameraControl(com.dimadesu.lifestreamer.camera.ControlKeys.TORCH, on) {
+            _toastMessageLiveData.postValue(if (on) "Torch: On" else "Torch: Off")
+        }
+    }
+
+    /** The label of a choice control's current option, for the toasts. */
+    private fun choiceLabel(
+        target: com.dimadesu.lifestreamer.camera.CameraControlManager.CameraTargetState?,
+        key: String
+    ): String? = target?.controls?.firstOrNull { it.key == key }
+        ?.let { control -> control.options?.firstOrNull { it.value == control.value }?.label }
+
+    private fun cycleCameraControl(key: String, onDone: (com.dimadesu.lifestreamer.camera.CameraControlManager.CameraTargetState?) -> Unit) {
+        val controls = cameraControls ?: return
+        val target = selectedCameraTarget() ?: return
+        viewModelScope.launch {
+            controls.cycle(target.id, key)
+                .onSuccess { onDone(controls.state.value.target(target.id)) }
+                .onFailure { _toastMessageLiveData.postValue(it.message) }
+        }
     }
 
     val isAutoWhiteBalanceAvailable = MutableLiveData(false)
     fun toggleAutoWhiteBalanceMode() {
-        cameraSettings?.let { settings ->
-            viewModelScope.launch {
-                try {
-                    val awbModes = settings.whiteBalance.availableAutoModes
-                    val index = awbModes.indexOf(settings.whiteBalance.autoMode)
-                    val newMode = awbModes[(index + 1) % awbModes.size]
-                    settings.whiteBalance.setAutoMode(newMode)
-                    
-                    // Show toast with white balance mode name
-                    val modeName = getWhiteBalanceModeName(newMode)
-                    _toastMessageLiveData.postValue("White Balance: $modeName")
-                } catch (t: Throwable) {
-                    Log.w(TAG, "toggleAutoWhiteBalanceMode failed (camera session may be closed): ${t.message}")
-                }
-            }
-        } ?: Log.e(TAG, "Camera settings is not accessible")
-    }
-
-    private fun getWhiteBalanceModeName(mode: Int): String {
-        return when (mode) {
-            CaptureResult.CONTROL_AWB_MODE_OFF -> "Off"
-            CaptureResult.CONTROL_AWB_MODE_AUTO -> "Auto"
-            CaptureResult.CONTROL_AWB_MODE_INCANDESCENT -> "Incandescent"
-            CaptureResult.CONTROL_AWB_MODE_FLUORESCENT -> "Fluorescent"
-            CaptureResult.CONTROL_AWB_MODE_WARM_FLUORESCENT -> "Warm Fluorescent"
-            CaptureResult.CONTROL_AWB_MODE_DAYLIGHT -> "Daylight"
-            CaptureResult.CONTROL_AWB_MODE_CLOUDY_DAYLIGHT -> "Cloudy"
-            CaptureResult.CONTROL_AWB_MODE_TWILIGHT -> "Twilight"
-            CaptureResult.CONTROL_AWB_MODE_SHADE -> "Shade"
-            else -> "Unknown"
+        val key = com.dimadesu.lifestreamer.camera.ControlKeys.AWB_MODE
+        cycleCameraControl(key) { target ->
+            _toastMessageLiveData.postValue("White Balance: ${choiceLabel(target, key)}")
         }
     }
 
@@ -5105,30 +5116,17 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
     val isExposureCompensationAvailable = MutableLiveData(false)
     val exposureCompensationRange = MutableLiveData<Range<Int>>()
     val exposureCompensationStep = MutableLiveData<Rational>()
+
+    /** In EV; the camera takes it in index steps. */
     var exposureCompensation: Float
         @Bindable get() {
-            val settings = cameraSettings
-            return if (settings != null && settings.isActiveFlow.value) {
-                settings.exposure.compensation * settings.exposure.availableCompensationStep.toFloat()
-            } else {
-                0f
-            }
+            val control = selectedControl(com.dimadesu.lifestreamer.camera.ControlKeys.EV) ?: return 0f
+            return ((control.value as? Number)?.toFloat() ?: 0f) * control.scale
         }
         set(value) {
-            cameraSettings?.let { settings ->
-                settings.exposure.let {
-                    viewModelScope.launch {
-                        try {
-                            if (settings.isActiveFlow.value) {
-                                it.setCompensation((value / it.availableCompensationStep.toFloat()).toInt())
-                            }
-                            notifyPropertyChanged(BR.exposureCompensation)
-                        } catch (t: Throwable) {
-                            Log.w(TAG, "Setting exposure compensation failed (camera session may be closed): ${t.message}")
-                        }
-                    }
-                }
-            } ?: Log.e(TAG, "Camera settings is not accessible")
+            val step = selectedControl(com.dimadesu.lifestreamer.camera.ControlKeys.EV)?.scale ?: return
+            if (step <= 0f) return
+            setCameraControl(com.dimadesu.lifestreamer.camera.ControlKeys.EV, kotlin.math.round(value / step).toInt())
         }
 
     val showZoomSlider = MutableLiveData(false)
@@ -5139,97 +5137,28 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
     val isZoomAvailable = MutableLiveData(false)
     val zoomRatioRange = MutableLiveData<Range<Float>>()
     var zoomRatio: Float
-        @Bindable get() {
-            val settings = cameraSettings
-            return if (settings != null && settings.isActiveFlow.value) {
-                runBlocking {
-                    settings.zoom.getZoomRatio()
-                }
-            } else {
-                1f
-            }
-        }
+        @Bindable get() = selectedCameraTarget()?.zoom?.ratio ?: 1f
         set(value) {
-            cameraSettings?.let { settings ->
-                viewModelScope.launch {
-                    try {
-                        if (settings.isActiveFlow.value) {
-                            settings.zoom.setZoomRatio(value)
-                        }
-                        notifyPropertyChanged(BR.zoomRatio)
-                    } catch (t: Throwable) {
-                        Log.w(TAG, "Setting zoom failed (camera session may be closed): ${t.message}")
-                    }
-                }
-            } ?: Log.e(TAG, "Camera settings is not accessible")
+            setCameraControl(com.dimadesu.lifestreamer.camera.ControlKeys.ZOOM, value)
         }
 
     val isAutoFocusModeAvailable = MutableLiveData(false)
     fun toggleAutoFocusMode() {
-        cameraSettings?.let {
-            viewModelScope.launch {
-                try {
-                    val afModes = it.focus.availableAutoModes
-                    val index = afModes.indexOf(it.focus.autoMode)
-                    val newMode = afModes[(index + 1) % afModes.size]
-                    it.focus.setAutoMode(newMode)
-                    
-                    // Show toast with auto focus mode name
-                    val modeName = getAutoFocusModeName(newMode)
-                    _toastMessageLiveData.postValue("Focus: $modeName")
-                    
-                    if (it.focus.autoMode == CaptureResult.CONTROL_AF_MODE_OFF) {
-                        showLensDistanceSlider.postValue(true)
-                    } else {
-                        showLensDistanceSlider.postValue(false)
-                    }
-                } catch (t: Throwable) {
-                    Log.w(TAG, "toggleAutoFocusMode failed (camera session may be closed): ${t.message}")
-                }
-            }
-        } ?: Log.e(TAG, "Camera settings is not accessible")
-    }
-
-    private fun getAutoFocusModeName(mode: Int): String {
-        return when (mode) {
-            CaptureResult.CONTROL_AF_MODE_OFF -> "Manual"
-            CaptureResult.CONTROL_AF_MODE_AUTO -> "Auto"
-            CaptureResult.CONTROL_AF_MODE_MACRO -> "Macro"
-            CaptureResult.CONTROL_AF_MODE_CONTINUOUS_VIDEO -> "Continuous Video"
-            CaptureResult.CONTROL_AF_MODE_CONTINUOUS_PICTURE -> "Continuous Picture"
-            CaptureResult.CONTROL_AF_MODE_EDOF -> "EDOF"
-            else -> "Unknown"
+        val key = com.dimadesu.lifestreamer.camera.ControlKeys.AF_MODE
+        cycleCameraControl(key) { target ->
+            _toastMessageLiveData.postValue("Focus: ${choiceLabel(target, key)}")
+            showLensDistanceSlider.postValue(
+                target?.values?.afMode == CaptureResult.CONTROL_AF_MODE_OFF
+            )
         }
     }
 
     val showLensDistanceSlider = MutableLiveData(false)
     val lensDistanceRange = MutableLiveData<Range<Float>>()
     var lensDistance: Float
-        @Bindable get() {
-            val settings = cameraSettings
-            return if ((settings != null) &&
-                settings.isActiveFlow.value
-            ) {
-                settings.focus.lensDistance
-            } else {
-                0f
-            }
-        }
+        @Bindable get() = selectedCameraTarget()?.values?.lensDiopters ?: 0f
         set(value) {
-            cameraSettings?.let { settings ->
-                settings.focus.let {
-                    viewModelScope.launch {
-                        try {
-                            if (settings.isActiveFlow.value) {
-                                it.setLensDistance(value)
-                            }
-                            notifyPropertyChanged(BR.lensDistance)
-                        } catch (t: Throwable) {
-                            Log.w(TAG, "Setting lens distance failed (camera session may be closed): ${t.message}")
-                        }
-                    }
-                }
-            } ?: Log.e(TAG, "Camera settings is not accessible")
+            setCameraControl(com.dimadesu.lifestreamer.camera.ControlKeys.LENS, value)
         }
 
     private fun notifySourceChanged() {
@@ -5247,17 +5176,8 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
 
     private fun notifyCameraChanged(videoSource: ICameraSource) {
         val settings = videoSource.settings
-        // Set optical stabilization first
-        // Do not set both video and optical stabilization at the same time
-        viewModelScope.launch {
-            if (settings.isActiveFlow.value) {
-                if (settings.stabilization.isOpticalAvailable) {
-                    settings.stabilization.setIsEnableOptical(true)
-                } else {
-                    settings.stabilization.setIsEnableVideo(true)
-                }
-            }
-        }
+        // Only what the camera can do: its values (and its stabilization) come from the camera
+        // controls, which re-apply what was remembered. Writing defaults here overwrote them.
 
         // Flash
         isFlashAvailable.postValue(settings.flash.isAvailable)
@@ -5276,14 +5196,12 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
             )
         )
         exposureCompensationStep.postValue(settings.exposure.availableCompensationStep)
-        exposureCompensation = 0f
 
         // Zoom
         isZoomAvailable.postValue(
             !settings.zoom.availableRatioRange.isEmpty
         )
         zoomRatioRange.postValue(settings.zoom.availableRatioRange)
-        zoomRatio = 1.0f
 
         // Focus
         isAutoFocusModeAvailable.postValue(settings.focus.availableAutoModes.size > 1)
@@ -5291,7 +5209,9 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
         // Lens distance
         showLensDistanceSlider.postValue(false)
         lensDistanceRange.postValue(settings.focus.availableLensDistanceRange)
-        lensDistance = 0f
+        notifyPropertyChanged(BR.exposureCompensation)
+        notifyPropertyChanged(BR.zoomRatio)
+        notifyPropertyChanged(BR.lensDistance)
     }
 
     /**

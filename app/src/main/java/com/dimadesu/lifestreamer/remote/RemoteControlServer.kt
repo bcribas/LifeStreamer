@@ -55,6 +55,7 @@ class RemoteControlServer(
     private val context: Context,
     private val port: Int,
     private val controller: CompositionController,
+    private val cameraControls: com.dimadesu.lifestreamer.camera.CameraControlManager,
     private val hooks: Hooks
 ) {
     /**
@@ -673,8 +674,8 @@ class RemoteControlServer(
             "/api/zoom" -> {
                 val body = parse<RemoteDto.ZoomRequest>(request.body)
                 when {
-                    body?.ratio != null -> controller.setZoom(body.layerId, body.ratio)
-                    body?.factor != null -> controller.nudgeZoom(body.layerId, body.factor)
+                    body?.ratio != null -> cameraControls.setZoom(body.layerId, body.ratio)
+                    body?.factor != null -> cameraControls.nudgeZoom(body.layerId, body.factor)
                     else -> {
                         respondJson(output, 400, RemoteDto.OkResponse(false, "Missing ratio or factor"))
                         return
@@ -835,14 +836,12 @@ class RemoteControlServer(
         val layout = composite?.layoutFlow?.value
         val camerasInUse = controller.cameraIdsInUse()
 
-        // Zoom is read from a cache that the controller refreshes when the composition or the
-        // zoom actually changes. Kicking a refresh off from here fed a loop: refresh -> emits
-        // layersInvalidated -> broadcastState -> buildState -> refresh, which never settled while
-        // the value jittered.
+        // Zoom is what the camera controls hold for each camera: known before a camera opens, and
+        // steady, so it never makes two snapshots differ on its own.
 
         val layers = layout?.layers?.sortedBy { it.z }?.map { layer ->
             val cameraId = (composite.childSource(layer.id) as? ICameraSource)?.cameraId
-            val zoom = controller.cachedZoomState(layer.id)
+            val zoom = cameraControls.zoomState(layer.id)
             RemoteDto.LayerDto(
                 id = layer.id,
                 label = controller.layerLabel(layer.id),
