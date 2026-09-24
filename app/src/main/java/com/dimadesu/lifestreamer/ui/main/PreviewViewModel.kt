@@ -74,6 +74,7 @@ import io.github.thibaultbee.streampack.core.elements.sources.video.camera.Camer
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.extensions.isFpsSupported
 import io.github.thibaultbee.streampack.core.interfaces.IWithVideoSource
 import com.dimadesu.lifestreamer.rtmp.audio.MediaProjectionAudioSourceFactory
+import io.github.thibaultbee.streampack.core.streamers.single.ISecondaryOutputStreamer
 import io.github.thibaultbee.streampack.core.streamers.single.SingleStreamer
 import io.github.thibaultbee.streampack.core.streamers.single.withAudio
 import io.github.thibaultbee.streampack.core.streamers.single.withVideo
@@ -244,7 +245,7 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                 // Wait for service to be ready before applying config
                 _serviceReady.first { it }
                 val streamer = serviceStreamer
-                if (streamer != null && streamer.isStreamingFlow.value != true) {
+                if (streamer != null && !isPipelineBusy()) {
                     savedVideoConfig?.let { config ->
                         try {
                             Log.i(TAG, "Applying pending video config after UI resumed")
@@ -310,7 +311,7 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
         viewModelScope.launch {
             _serviceReady.first { it }
             val streamer = serviceStreamer
-            if (streamer != null && streamer.isStreamingFlow.value != true) {
+            if (streamer != null && !isPipelineBusy()) {
                 try {
                     Log.i(TAG, "Applying pending audio config after permission granted")
                     applyAudioConfigSafely(streamer, config)
@@ -845,6 +846,10 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                 Log.i(TAG, "SRTLA mode: starting embedded SRTLA proxy (${srtlaConfig.receiverHost}:${srtlaConfig.receiverPort})")
                 SrtlaManager.start(getApplication(), srtlaConfig.receiverHost, srtlaConfig.receiverPort, srtlaConfig.listenPort)
             }
+
+            // Before the live opens: the recording's encoder can still shape the sources then.
+            // Idempotent, so a reconnection, which comes through here too, leaves it running.
+            service?.recordingController?.onLiveStarting()
 
             // Add timeout to prevent hanging
             // Run on IO dispatcher to prevent blocking UI thread
@@ -1405,11 +1410,23 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
      * Initialize streamer sources after service is ready.
      * Only initializes if streamer is not already streaming to avoid configuration conflicts.
      */
+    /**
+     * Whether the sources are busy, for the live or for a recording that outlives it. Whatever
+     * would change the source configuration or restart the camera asks this, not whether the
+     * live is on the air.
+     */
+    private fun isPipelineBusy(): Boolean {
+        val streamer = serviceStreamer ?: return false
+        return (streamer as? ISecondaryOutputStreamer)?.isPipelineStreamingFlow?.value
+            ?: (streamer.isStreamingFlow.value == true)
+    }
+
     private suspend fun initializeStreamerSources() {
         val currentStreamer = serviceStreamer ?: return
 
-        // Don't reinitialize sources if already streaming - this prevents configuration conflicts
-        if (currentStreamer.isStreamingFlow.value == true) {
+        // Don't reinitialize sources if already streaming - this prevents configuration conflicts.
+        // A recording that outlived the live counts: its sources are the same.
+        if (isPipelineBusy()) {
             Log.i(TAG, "Streamer is already streaming - skipping source initialization to avoid conflicts")
             observeStreamerFlows()
             // Set initial audio source indicator based on current source
@@ -1471,9 +1488,13 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
         observePreviewResolution()
         observeMountedMode()
 
-        // Flush a preview resolution change that had to wait for the stream to stop.
+        // Flush a preview resolution change that had to wait for the stream to stop (and for a
+        // recording, which uses the same capture session).
         viewModelScope.launch {
-            currentStreamer.isStreamingFlow.collect { isStreaming ->
+            val sourcesStreamingFlow =
+                (currentStreamer as? ISecondaryOutputStreamer)?.isPipelineStreamingFlow
+                    ?: currentStreamer.isStreamingFlow
+            sourcesStreamingFlow.collect { isStreaming ->
                 if (!isStreaming) {
                     flushPendingPreviewShortEdge()
                 }
@@ -1726,7 +1747,7 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
             storageRepository.audioConfigFlow
                 .collect { config ->
                     // Don't change audio config while streaming to avoid configuration conflicts
-                    if (serviceStreamer?.isStreamingFlow?.value == true) {
+                    if (isPipelineBusy()) {
                         Log.i(TAG, "Skipping audio config change - streamer is currently streaming")
                         return@collect
                     }
@@ -1762,7 +1783,7 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
             storageRepository.videoConfigFlow
                 .collect { config ->
                     // Don't change video config while streaming to avoid configuration conflicts
-                    if (serviceStreamer?.isStreamingFlow?.value == true) {
+                    if (isPipelineBusy()) {
                         Log.i(TAG, "Skipping video config change - streamer is currently streaming")
                         return@collect
                     }
@@ -4534,7 +4555,7 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
      * most likely to upset the camera HAL mid-stream. Same deferral idea as the video config.
      */
     private fun applyPreviewShortEdge(shortEdge: Int?) {
-        val isStreaming = serviceStreamer?.isStreamingFlow?.value == true
+        val isStreaming = isPipelineBusy()
         val isComposite = activeComposite() != null
 
         if (!isStreaming || isComposite) {

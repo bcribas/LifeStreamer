@@ -156,6 +156,22 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         )
     }
     private val streamConfigurationHelper by lazy { StreamConfigurationHelper(storageRepository) }
+
+    /**
+     * Local recording, tied to the live session rather than to the connection: it starts with the
+     * live and stops only on a manual stop, so network drops leave it running.
+     */
+    val recordingController by lazy {
+        com.dimadesu.lifestreamer.recording.RecordingController(
+            this, recordingScope, storageRepository
+        ) { streamer }
+    }
+
+    /**
+     * Off the main thread on purpose: onDestroy waits for the recording to close its last segment,
+     * and a controller coroutine that needed the main thread to resume would wait for it back.
+     */
+    private val recordingScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     
     // Current device rotation
     private var currentRotation: Int = Surface.ROTATION_0
@@ -830,6 +846,14 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         try {
             bluetoothAudioManager.cleanup()
         } catch (_: Throwable) {}
+
+        // Close the last segment before the pipeline is released under it
+        try {
+            runBlocking { withTimeoutOrNull(5_000) { recordingController.shutdown() } }
+        } catch (t: Throwable) {
+            Log.w(TAG, "onDestroy: recording shutdown failed: ${t.message}")
+        }
+        recordingScope.cancel()
 
         super.onDestroy()
     }
@@ -1785,6 +1809,9 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                 try { _serviceStreamStatus.tryEmit(StreamStatus.CONNECTING) } catch (_: Throwable) {}
                 // Use NonCancellable for camera configuration to prevent "Broken pipe" errors
                 // if coroutine is cancelled during camera setup
+                // Before the live opens: the recording's encoder can still shape the sources then,
+                // and it starts even if the network is down
+                recordingController.onLiveStarting()
                 withTimeout(5000) { // 5s open timeout
                     // withContext(NonCancellable) {
                         currentStreamer.open(descriptor)
@@ -2215,6 +2242,8 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
     fun markUserStoppedManually() {
         Log.i(TAG, "markUserStoppedManually() called")
         _userStoppedManually.value = true
+        // The live session is over, and the recording that belongs to it
+        recordingController.onManualStop()
         // Also cancel any ongoing reconnection
         if (_isReconnecting.value) {
             Log.i(TAG, "Cancelling reconnection due to manual stop")
