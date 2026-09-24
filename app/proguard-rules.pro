@@ -70,3 +70,7 @@
 # Settings sections: settings_index.xml names them in app:fragment, and the fragment factory
 # loads them by that name. A renamed class would crash when its section is opened.
 -keep class com.dimadesu.lifestreamer.ui.settings.** extends androidx.preference.PreferenceFragmentCompat { <init>(); }
+
+# Per-camera controls, remembered with Gson. Without this, R8 renames the fields and every
+# camera silently comes back on automatic in release builds.
+-keep class com.dimadesu.lifestreamer.camera.CameraControlStore$* { *; }
