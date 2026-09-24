@@ -865,24 +865,27 @@ class SettingsFragment : PreferenceFragmentCompat() {
         }
 
         // Inflates audio sample rate, capped at the low bitrates (see LowBitrateAudio). A bitrate
-        // change re-inflates it, and says so when that lowers the rate already chosen.
-        inflateAudioSampleRates(encoder, audioBitrateListPreference.value?.toIntOrNull())
+        // or channel change re-inflates it, and says so when that lowers the rate already chosen.
+        // The listeners run before the new value is saved, so each passes the one it is changing.
+        inflateAudioSampleRates(
+            encoder,
+            audioBitrateListPreference.value?.toIntOrNull(),
+            audioChannelConfigListPreference.value?.toIntOrNull()
+        )
         audioBitrateListPreference.setOnPreferenceChangeListener { _, newValue ->
-            val bitrate = (newValue as String).toInt()
-            val before = audioSampleRateListPreference.value
-            inflateAudioSampleRates(encoder, bitrate)
-            val after = audioSampleRateListPreference.value
-            if (after != before && after != null) {
-                android.widget.Toast.makeText(
-                    requireContext(),
-                    getString(
-                        R.string.audio_sample_rate_lowered,
-                        "%.1f".format(after.toFloat() / 1000),
-                        bitrate / 1000
-                    ),
-                    android.widget.Toast.LENGTH_LONG
-                ).show()
-            }
+            reapplyAudioSampleRateCap(
+                encoder,
+                (newValue as String).toInt(),
+                audioChannelConfigListPreference.value?.toIntOrNull()
+            )
+            true
+        }
+        audioChannelConfigListPreference.setOnPreferenceChangeListener { _, newValue ->
+            reapplyAudioSampleRateCap(
+                encoder,
+                audioBitrateListPreference.value?.toIntOrNull(),
+                (newValue as String).toInt()
+            )
             true
         }
 
@@ -921,8 +924,28 @@ class SettingsFragment : PreferenceFragmentCompat() {
         }
     }
 
-    private fun inflateAudioSampleRates(encoder: String, bitrate: Int?) {
-        val cap = bitrate?.let { LowBitrateAudio.maxSampleRate(it) }
+    private fun reapplyAudioSampleRateCap(encoder: String, bitrate: Int?, channelConfig: Int?) {
+        val before = audioSampleRateListPreference.value
+        inflateAudioSampleRates(encoder, bitrate, channelConfig)
+        val after = audioSampleRateListPreference.value
+        if (after != before && after != null && bitrate != null) {
+            val channels = channelConfig?.let { AudioConfig.getNumberOfChannels(it) } ?: 2
+            android.widget.Toast.makeText(
+                requireContext(),
+                getString(
+                    R.string.audio_sample_rate_lowered,
+                    "%.1f".format(after.toFloat() / 1000),
+                    bitrate / 1000,
+                    getString(if (channels <= 1) R.string.audio_mono else R.string.audio_stereo)
+                ),
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    private fun inflateAudioSampleRates(encoder: String, bitrate: Int?, channelConfig: Int?) {
+        val channels = channelConfig?.let { AudioConfig.getNumberOfChannels(it) } ?: 2
+        val cap = bitrate?.let { LowBitrateAudio.maxSampleRate(it, channels) }
         val supported = streamerInfo.audio.getSupportedSampleRates(encoder).toList()
         val sampleRates = supported.filter { cap == null || it <= cap }.ifEmpty { supported }
         audioSampleRateListPreference.entries =

@@ -68,6 +68,7 @@ class DataStoreRepository(
         // (or left behind by a bitrate change) cannot reach the encoder.
         val sampleRate = LowBitrateAudio.coerceSampleRate(
             startBitrate,
+            AudioConfig.getNumberOfChannels(channelConfig),
             preferences[stringPreferencesKey(context.getString(R.string.audio_sample_rate_key))]?.toInt()
                 ?: ApplicationConstants.Audio.defaultSampleRate
         )
