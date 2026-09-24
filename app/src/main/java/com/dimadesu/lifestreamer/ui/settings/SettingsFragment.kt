@@ -43,6 +43,7 @@ import com.dimadesu.lifestreamer.utils.DialogUtils
 import com.dimadesu.lifestreamer.utils.ProfileLevelDisplay
 import com.dimadesu.lifestreamer.utils.StreamerInfoFactory
 import com.dimadesu.lifestreamer.utils.dataStore
+import io.github.thibaultbee.streampack.core.configuration.BitrateRegulatorConfig
 import io.github.thibaultbee.streampack.core.elements.encoders.mediacodec.MediaCodecHelper
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.extensions.cameras
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.extensions.defaultCameraId
@@ -50,11 +51,24 @@ import io.github.thibaultbee.streampack.core.elements.sources.video.camera.exten
 import io.github.thibaultbee.streampack.core.streamers.infos.CameraStreamerConfigurationInfo
 import io.github.thibaultbee.streampack.core.streamers.single.AudioConfig
 import io.github.thibaultbee.streampack.core.streamers.single.VideoConfig
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.io.IOException
+import kotlin.math.roundToInt
 
 class SettingsFragment : PreferenceFragmentCompat() {
+    private companion object {
+        /**
+         * H.264 bits per pixel per frame below which the picture visibly breaks up into blocks,
+         * worse still with the motion of a car: 1080p30 needs about 1250 kb/s, 360p15 about 70.
+         */
+        const val MIN_BITS_PER_PIXEL = 0.02
+
+        /** The frame rate the warning suggests when a smaller resolution is not enough. */
+        const val LOW_FPS = 15
+    }
+
     private lateinit var streamerInfo: CameraStreamerConfigurationInfo
     private val profileLevelDisplay by lazy { ProfileLevelDisplay(requireContext()) }
     private val storageRepository by lazy { DataStoreRepository(requireContext(), requireContext().dataStore) }
@@ -231,6 +245,16 @@ class SettingsFragment : PreferenceFragmentCompat() {
     }
 
     /**
+     * Snaps a bitrate slider (kb/s) to a round value: 50 kb/s steps below 1 Mb/s, where a
+     * low-bandwidth link needs the precision, and 500 kb/s steps from there up. Rounds to the
+     * nearest step rather than down, so a minimum of 300 no longer falls to 100.
+     */
+    private fun snapBitrate(value: Int): Int {
+        val step = if (value < 1000) 50 else 500
+        return ((value + step / 2) / step) * step
+    }
+
+    /**
      * Fills in whether this device can run two of its own cameras at once.
      *
      * Read-only on purpose: it is a device fact, and its whole job is to answer "why can't I add
@@ -261,6 +285,84 @@ class SettingsFragment : PreferenceFragmentCompat() {
                 }
             }
         }
+        // Collected from the stored values rather than from each preference's change listener:
+        // those run before the new value is saved, and several of the preferences involved
+        // already have a listener of their own.
+        viewLifecycleOwner.lifecycleScope.launch {
+            viewLifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                combine(
+                    storageRepository.videoConfigFlow,
+                    storageRepository.bitrateRegulatorConfigFlow
+                ) { video, regulator -> video to regulator }
+                    .collect { (video, regulator) ->
+                        runCatching { updateBitrateWarning(video, regulator) }
+                    }
+            }
+        }
+    }
+
+    /**
+     * Warns, on the slider that actually caps the video bitrate, when it is too low for the
+     * resolution and frame rate: 200 kb/s is watchable at 640x360 but a smear of blocks at 1080p30.
+     *
+     * While regulation is on, its target is the ceiling and the plain bitrate is only where the
+     * encoder starts, so the warning goes on the target and the plain one stays quiet.
+     */
+    private fun updateBitrateWarning(video: VideoConfig?, regulator: BitrateRegulatorConfig?) {
+        val sliders = listOf(
+            videoBitrateSeekBar,
+            serverTargetVideoBitratePreference,
+            rtmpServerTargetVideoBitratePreference
+        )
+        sliders.forEach { it.summary = null }
+        video ?: return
+
+        val endpoint = EndpointFactory(
+            EndpointType.fromId(endpointTypePreference.value?.toIntOrNull() ?: 0)
+        ).build()
+        val (slider, bitrateBps) = when {
+            regulator == null -> videoBitrateSeekBar to video.startBitrate
+            endpoint.hasRtmpCapabilities ->
+                rtmpServerTargetVideoBitratePreference to regulator.videoBitrateRange.upper
+            else -> serverTargetVideoBitratePreference to regulator.videoBitrateRange.upper
+        }
+        // The encoder is fed every frame the cameras deliver, whatever its own FPS setting says.
+        val fps = maxOf(video.fps, video.cameraFps ?: video.fps)
+        slider.summary = lowBitrateWarning(bitrateBps, video.resolution, fps)
+    }
+
+    /**
+     * Null when [bitrateBps] gives at least [MIN_BITS_PER_PIXEL] per pixel per frame, otherwise
+     * the warning with the nearest fix: a smaller resolution from the ones this screen offers,
+     * preferring the same shape, then the cameras at 15 fps.
+     */
+    private fun lowBitrateWarning(bitrateBps: Int, resolution: android.util.Size, fps: Int): String? {
+        fun bitsPerPixel(size: android.util.Size, atFps: Int) =
+            bitrateBps.toDouble() / (size.width.toLong() * size.height * atFps)
+
+        if (fps <= 0 || bitsPerPixel(resolution, fps) >= MIN_BITS_PER_PIXEL) return null
+
+        val kbps = bitrateBps / 1000
+        val neededKbps =
+            (resolution.width.toDouble() * resolution.height * fps * MIN_BITS_PER_PIXEL / 1000 / 50)
+                .roundToInt() * 50
+        val offered = videoResolutionListPreference.entryValues.orEmpty()
+            .mapNotNull { runCatching { android.util.Size.parseSize(it.toString()) }.getOrNull() }
+            .sortedByDescending { it.width.toLong() * it.height }
+        // Same shape first (sortedBy is stable, so each group keeps its size order): a 16:9
+        // stream should be pointed at 640x360, not at a 4:3 camera size that happens to fit.
+        val shape = resolution.width.toDouble() / resolution.height
+        val smaller = offered
+            .filter { it.width.toLong() * it.height < resolution.width.toLong() * resolution.height }
+            .sortedBy { if (kotlin.math.abs(it.width.toDouble() / it.height - shape) < 0.05) 0 else 1 }
+        val advice = smaller.firstOrNull { bitsPerPixel(it, fps) >= MIN_BITS_PER_PIXEL }
+            ?.let { getString(R.string.bitrate_warning_use_resolution, kbps, it.toString()) }
+            ?: (listOf(resolution) + smaller)
+                .takeIf { fps > LOW_FPS }
+                ?.firstOrNull { bitsPerPixel(it, LOW_FPS) >= MIN_BITS_PER_PIXEL }
+                ?.let { getString(R.string.bitrate_warning_use_15_fps, kbps, it.toString()) }
+            ?: getString(R.string.bitrate_warning_raise_bitrate)
+        return getString(R.string.bitrate_warning_low, resolution.toString(), fps, neededKbps, advice)
     }
 
     override fun onResume() {
@@ -732,7 +834,7 @@ class SettingsFragment : PreferenceFragmentCompat() {
         }
         
         videoBitrateSeekBar.setOnPreferenceChangeListener { _, newValue ->
-            val rounded = roundBitrate(newValue as Int)
+            val rounded = snapBitrate(newValue as Int)
             if (rounded != newValue) {
                 videoBitrateSeekBar.value = rounded
                 false
@@ -984,7 +1086,7 @@ class SettingsFragment : PreferenceFragmentCompat() {
         }
 
         serverTargetVideoBitratePreference.setOnPreferenceChangeListener { _, newValue ->
-            val rounded = roundBitrate(newValue as Int)
+            val rounded = snapBitrate(newValue as Int)
             if (rounded < serverMinVideoBitratePreference.value) {
                 serverMinVideoBitratePreference.value = rounded
             }
@@ -997,7 +1099,7 @@ class SettingsFragment : PreferenceFragmentCompat() {
         }
 
         serverMinVideoBitratePreference.setOnPreferenceChangeListener { _, newValue ->
-            val rounded = roundBitrate(newValue as Int)
+            val rounded = snapBitrate(newValue as Int)
             if (rounded > serverTargetVideoBitratePreference.value) {
                 serverTargetVideoBitratePreference.value = rounded
             }
@@ -1019,7 +1121,7 @@ class SettingsFragment : PreferenceFragmentCompat() {
         }
 
         rtmpServerTargetVideoBitratePreference.setOnPreferenceChangeListener { _, newValue ->
-            val rounded = roundBitrate(newValue as Int)
+            val rounded = snapBitrate(newValue as Int)
             if (rounded < rtmpServerMinVideoBitratePreference.value) {
                 rtmpServerMinVideoBitratePreference.value = rounded
             }
@@ -1032,7 +1134,7 @@ class SettingsFragment : PreferenceFragmentCompat() {
         }
 
         rtmpServerMinVideoBitratePreference.setOnPreferenceChangeListener { _, newValue ->
-            val rounded = roundBitrate(newValue as Int)
+            val rounded = snapBitrate(newValue as Int)
             if (rounded > rtmpServerTargetVideoBitratePreference.value) {
                 rtmpServerTargetVideoBitratePreference.value = rounded
             }

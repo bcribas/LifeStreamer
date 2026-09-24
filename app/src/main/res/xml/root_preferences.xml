@@ -201,7 +201,7 @@
                 android:max="10000"
                 app:defaultValue="@string/default_video_bitrate"
                 app:key="@string/video_bitrate_key"
-                app:min="500"
+                app:min="200"
                 app:showSeekBarValue="true"
                 app:title="@string/video_bitrate"
                 app:useSimpleSummaryProvider="true" />
@@ -434,7 +434,7 @@
                 android:max="10000"
                 app:defaultValue="5000"
                 app:key="@string/srt_server_video_target_bitrate_key"
-                app:min="500"
+                app:min="200"
                 app:showSeekBarValue="true"
                 app:title="@string/srt_server_video_target_bitrate"
                 app:useSimpleSummaryProvider="true" />
@@ -465,7 +465,7 @@
                 android:max="10000"
                 app:defaultValue="5000"
                 app:key="@string/rtmp_server_video_target_bitrate_key"
-                app:min="500"
+                app:min="200"
                 app:showSeekBarValue="true"
                 app:title="@string/rtmp_server_video_target_bitrate"
                 app:useSimpleSummaryProvider="true" />

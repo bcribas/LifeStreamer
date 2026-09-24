@@ -41,6 +41,9 @@ class MoblinSrtFightBitrateRegulator(
 
         // Matches Moblin's adaptiveBitrateTransportMinimum (= adaptiveBitrateStart).
         private const val TRANSPORT_BITRATE_MINIMUM = ADAPTIVBITRATE_START
+
+        // Target below which the fixed steps shrink with it (see [scaled]).
+        private const val LOW_BITRATE_REFERENCE = 1_000_000L
     }
 
     // Current bitrate state - matches Moblin's approach
@@ -84,7 +87,8 @@ class MoblinSrtFightBitrateRegulator(
         if (targetBitrate == 0L) {
             // Use the upper limit from bitrate regulator config as target, not current bitrate
             targetBitrate = bitrateRegulatorConfig.videoBitrateRange.upper.toLong()
-            currentMaximumBitrate = ADAPTIVBITRATE_START // Start from 1 Mbps, scale up to target
+            // Start from 1 Mbps and scale up to the target, or at the target when it is lower
+            currentMaximumBitrate = min(ADAPTIVBITRATE_START, targetBitrate)
         }
 
         val metrics = metricsTracker.cumulative as? SrtEndpointMetrics ?: return
@@ -111,13 +115,13 @@ class MoblinSrtFightBitrateRegulator(
         increaseCurrentMaxBitrate(packetsInFlight, rttMs, allowedRttJitter = 15.0, allowedPifJitter = 10.0)
         
         // Slow decreases if needed - matches Moblin's thresholds
-        decreaseMaxRateIfPifIsHigh(factor = 0.9, pifMax = 100.0, minimumDecrease = 250_000L)
-        decreaseMaxRateIfRttIsHigh(factor = 0.9, rttMax = 250.0, minimumDecrease = 250_000L)
+        decreaseMaxRateIfPifIsHigh(factor = 0.9, pifMax = 100.0, minimumDecrease = scaled(250_000L))
+        decreaseMaxRateIfRttIsHigh(factor = 0.9, rttMax = 250.0, minimumDecrease = scaled(250_000L))
         decreaseMaxRateIfRttDiffIsHigh(
             rttMs,
             factor = currentSettings.rttDiffHighFactor,
             rttSpikeAllowed = currentSettings.rttDiffHighAllowedSpike,
-            minimumDecrease = currentSettings.rttDiffHighMinDecrease
+            minimumDecrease = scaled(currentSettings.rttDiffHighMinDecrease)
         )
         
         calculateCurrentBitrate()
@@ -134,6 +138,15 @@ class MoblinSrtFightBitrateRegulator(
         
         // Log.d(TAG, "=== END UPDATE ===")
     }
+
+    /**
+     * Moblin's steps are absolute (250k decreases, a 500k hard drop, up to +100k a tick, a 1 Mbps
+     * transport margin) and tuned for Mbps links: against a 300 kb/s target one step swings the
+     * whole range. Below [LOW_BITRATE_REFERENCE] they shrink in proportion to the target; from
+     * there up they are exactly Moblin's.
+     */
+    private fun scaled(bps: Long): Long =
+        bps * min(targetBitrate, LOW_BITRATE_REFERENCE) / LOW_BITRATE_REFERENCE
 
     /**
      * Ported from Moblin's updateSrtTransportBitrate: EMA over deltas of the cumulative bytes-sent
@@ -225,7 +238,7 @@ class MoblinSrtFightBitrateRegulator(
         
         if (pifCondition && rttCondition) {
             if (jitterCondition) {
-                val increase = (currentSettings.pifDiffIncreaseFactor * pifDiffThing) / currentSettings.packetsInFlight
+                val increase = (scaled(currentSettings.pifDiffIncreaseFactor) * pifDiffThing) / currentSettings.packetsInFlight
                 currentMaximumBitrate += increase
                 // Log.d(TAG, "INCREASING: +${increase / 1000}k (factor=${currentSettings.pifDiffIncreaseFactor})")
                 
@@ -315,7 +328,7 @@ class MoblinSrtFightBitrateRegulator(
         
         // Harder decrease
         if (pifSpikeDiff == currentSettings.packetsInFlight) {
-            currentMaximumBitrate -= 500_000
+            currentMaximumBitrate -= scaled(500_000L)
             // logAction("PIF: -500k dec diff $pifSpikeDiff == ${currentSettings.packetsInFlight}")
             // Log.d(TAG, "Hard decrease applied: -500k")
         }
@@ -327,11 +340,16 @@ class MoblinSrtFightBitrateRegulator(
         // Don't let the max bitrate run away from what SRT can actually send right now.
         if (transportBitrateBps > 0) {
             val maxAllowedByTransport = max(
-                transportBitrateBps + TRANSPORT_BITRATE_MINIMUM,
+                transportBitrateBps + scaled(TRANSPORT_BITRATE_MINIMUM),
                 (17 * transportBitrateBps) / 10
             )
             currentMaximumBitrate = min(currentMaximumBitrate, maxAllowedByTransport)
         }
+
+        // Cap to the target on every tick, not only on an increase: a max left above it (the
+        // target lowered through setTargetBitrate) would absorb decreases that never reach the
+        // encoder, because the encoder only ever sees the value clamped to the target.
+        currentMaximumBitrate = min(currentMaximumBitrate, targetBitrate)
         
         val configuredMinBitrate = max(currentSettings.minimumBitrate, bitrateRegulatorConfig.videoBitrateRange.lower.toLong())
         val minimumBitrate = max(50000L, configuredMinBitrate)

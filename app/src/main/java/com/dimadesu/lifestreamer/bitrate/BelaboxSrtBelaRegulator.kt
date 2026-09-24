@@ -43,6 +43,9 @@ class BelaboxSrtBelaRegulator(
 
         private const val ADAPTIVE_BITRATE_START: Long = 1_000_000L
         private const val ADAPTIVE_BITRATE_TRANSPORT_MINIMUM: Long = ADAPTIVE_BITRATE_START
+
+        // Target below which the fixed steps shrink with it (see [scaled]).
+        private const val LOW_BITRATE_REFERENCE: Long = 1_000_000L
     }
 
     // Settings mirror AdaptiveBitrateSettings from Swift
@@ -73,7 +76,7 @@ class BelaboxSrtBelaRegulator(
     private var throughput: Double = 0.0
     private var nextBitrateIncrTimeNs: Long = System.nanoTime()
     private var nextBitrateDecrTimeNs: Long = System.nanoTime()
-    private var curBitrate: Long = ADAPTIVE_BITRATE_START
+    private var curBitrate: Long = min(ADAPTIVE_BITRATE_START, targetBitrate)
 
     // Transport bitrate: EMA over byte-sent deltas, matching iOS's streamTransportBitrate()
     private val transportBitrateEstimator = TransportBitrateEstimator()
@@ -194,21 +197,21 @@ class BelaboxSrtBelaRegulator(
             nextBitrateDecrTimeNs = nowNs + BITRATE_DECR_INTERVAL_MS * 1_000_000L
             logAdaptiveAction("Set min: ${bitrate / 1000}, rtt: $rtt >= latency/3: ${srtLatency / 3.0} or bs: $sendBufferSize > bs_th3: $sendBufferSizeTh3")
         } else if (nowNs > nextBitrateDecrTimeNs && (rtt > (srtLatency / 5.0) || sendBufferSize > sendBufferSizeTh2)) {
-            bitrate -= (BITRATE_DECR_MIN + bitrate / BITRATE_DECR_SCALE)
+            bitrate -= (scaled(BITRATE_DECR_MIN) + bitrate / BITRATE_DECR_SCALE)
             nextBitrateDecrTimeNs = nowNs + BITRATE_DECR_FAST_INTERVAL_MS * 1_000_000L
-            logAdaptiveAction("Fast decr: ${(BITRATE_DECR_MIN + bitrate / BITRATE_DECR_SCALE) / 1000}, rtt: $rtt > latency/5: ${srtLatency / 5.0} or bs: $sendBufferSize > bs_th2: $sendBufferSizeTh2")
+            logAdaptiveAction("Fast decr: ${(scaled(BITRATE_DECR_MIN) + bitrate / BITRATE_DECR_SCALE) / 1000}, rtt: $rtt > latency/5: ${srtLatency / 5.0} or bs: $sendBufferSize > bs_th2: $sendBufferSizeTh2")
         } else if (nowNs > nextBitrateDecrTimeNs && (rtt > rttThMax || sendBufferSize > sendBufferSizeTh1)) {
-            bitrate -= BITRATE_DECR_MIN
+            bitrate -= scaled(BITRATE_DECR_MIN)
             nextBitrateDecrTimeNs = nowNs + BITRATE_DECR_INTERVAL_MS * 1_000_000L
-            logAdaptiveAction("Decr: ${BITRATE_DECR_MIN / 1000}, rtt: $rtt > rtt_th_max: $rttThMax or bs: $sendBufferSize > bs_th1: $sendBufferSizeTh1")
+            logAdaptiveAction("Decr: ${scaled(BITRATE_DECR_MIN) / 1000}, rtt: $rtt > rtt_th_max: $rttThMax or bs: $sendBufferSize > bs_th1: $sendBufferSizeTh1")
         } else if (nowNs > nextBitrateIncrTimeNs && rtt < rttThMin && rttAvgDelta < 0.01) {
-            bitrate += BITRATE_INCR_MIN + bitrate / BITRATE_INCR_SCALE
+            bitrate += scaled(BITRATE_INCR_MIN) + bitrate / BITRATE_INCR_SCALE
             nextBitrateIncrTimeNs = nowNs + BITRATE_INCR_INTERVAL_MS * 1_000_000L
         }
 
         // Cap against transport estimate (EMA over byte-sent deltas, matching iOS)
         if (transportBitrateBps > 0L) {
-            val maximumBitrate = max(transportBitrateBps + ADAPTIVE_BITRATE_TRANSPORT_MINIMUM, (17 * transportBitrateBps) / 10)
+            val maximumBitrate = max(transportBitrateBps + scaled(ADAPTIVE_BITRATE_TRANSPORT_MINIMUM), (17 * transportBitrateBps) / 10)
             if (bitrate > maximumBitrate) {
                 bitrate = maximumBitrate
             }
@@ -222,6 +225,15 @@ class BelaboxSrtBelaRegulator(
             onVideoTargetBitrateChange(curBitrate.toInt())
         }
     }
+
+    /**
+     * BELABOX's 100k steps and 1 Mbps transport margin are tuned for Mbps links: against a 300 kb/s
+     * target each step is a third of the range and the rate just bounces between the minimum and
+     * the target. Below [LOW_BITRATE_REFERENCE] they shrink in proportion to the target, read on
+     * every tick because [setTargetBitrate] can move it; from there up they are unchanged.
+     */
+    private fun scaled(bps: Long): Long =
+        bps * min(targetBitrate, LOW_BITRATE_REFERENCE) / LOW_BITRATE_REFERENCE
 
     override fun update(currentVideoBitrate: Int, currentAudioBitrate: Int) {
         val metrics = metricsTracker.cumulative as? SrtEndpointMetrics ?: return

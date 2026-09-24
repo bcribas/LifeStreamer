@@ -96,6 +96,10 @@
     <string name="default_fps">30</string>
 
     <string name="video_bitrate">Bitrate in kbps</string>
+    <string name="bitrate_warning_low">⚠ Low for %1$s at %2$d fps: below about %3$d kb/s the picture turns blocky. %4$s</string>
+    <string name="bitrate_warning_use_resolution">For %1$d kb/s, use %2$s or lower.</string>
+    <string name="bitrate_warning_use_15_fps">For %1$d kb/s, use %2$s with the cameras at 15 fps.</string>
+    <string name="bitrate_warning_raise_bitrate">Even 426x240 with the cameras at 15 fps needs more.</string>
     <string name="video_bitrate_key">live_video_bitrate_key</string>
     <string name="default_video_bitrate">1000</string>
 

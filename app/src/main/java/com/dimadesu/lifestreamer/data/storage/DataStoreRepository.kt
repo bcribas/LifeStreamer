@@ -496,8 +496,10 @@ class DataStoreRepository(
                 )]?.toInt()
                     ?.times(1000)
                     ?: 10000000
+            // The minimum's fallback is 300 kb/s, above the lowest target: Range() throws when
+            // lower > upper, which would take the whole regulator config down with it.
             BitrateRegulatorConfig(
-                videoBitrateRange = Range(videoMinBitrate, videoMaxBitrate)
+                videoBitrateRange = Range(minOf(videoMinBitrate, videoMaxBitrate), videoMaxBitrate)
             )
         }
 

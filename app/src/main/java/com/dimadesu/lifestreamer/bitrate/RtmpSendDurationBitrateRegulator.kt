@@ -77,6 +77,19 @@ class RtmpSendDurationBitrateRegulator(
         // Allows a flat overshoot buffer when throughput is extremely low (< 143 kbps).
         // Reduced from Moblin's 1_000_000L (which works for SRT's large buffers but fatal for RTMP).
         private const val TRANSPORT_BITRATE_MINIMUM = 100_000L
+
+        // Target below which the fixed steps shrink with it (see [scaled]).
+        private const val LOW_BITRATE_REFERENCE = 1_000_000L
+    }
+
+    /**
+     * The 100k minimum steps are tuned for Mbps links: with a 150 kb/s target a single decrease
+     * would cut two thirds of the rate. Below [LOW_BITRATE_REFERENCE] they shrink in proportion to
+     * the target; from there up they are unchanged.
+     */
+    private fun scaled(bps: Int): Int {
+        val target = bitrateRegulatorConfig.videoBitrateRange.upper.toLong()
+        return (bps * min(target, LOW_BITRATE_REFERENCE) / LOW_BITRATE_REFERENCE).toInt()
     }
 
     private var lastRawMetrics: RtmpMetrics? = null
@@ -137,7 +150,7 @@ class RtmpSendDurationBitrateRegulator(
                     .toInt().coerceIn(MIN_PERCENTAGE_DECREASE, MAX_PERCENTAGE_DECREASE)
                 val newBitrate = currentVideoBitrate - max(
                     currentVideoBitrate * percentageReduction / 100,
-                    MIN_DECREASE_STEP
+                    scaled(MIN_DECREASE_STEP)
                 )
                 consecutiveDecreases++
                 Log.i(TAG, "Queue overflow: dropped=$deltaDropped, reducing by $percentageReduction% to $newBitrate")
@@ -157,7 +170,7 @@ class RtmpSendDurationBitrateRegulator(
                 val scaledPercentage = (FILL_RATIO_DECREASE_PERCENTAGE * escalation).toInt().coerceAtMost(80)
                 val newBitrate = currentVideoBitrate - max(
                     currentVideoBitrate * scaledPercentage / 100,
-                    MIN_DECREASE_STEP
+                    scaled(MIN_DECREASE_STEP)
                 )
                 consecutiveDecreases++
                 Log.i(TAG, "Write saturation: smoothFillRatio=$smoothFillRatio, esc=${"%.1f".format(escalation)}, reducing by $scaledPercentage% to $newBitrate")
@@ -169,7 +182,7 @@ class RtmpSendDurationBitrateRegulator(
                 val scaledPercentage = (FILL_RATIO_LAZY_DECREASE_PERCENTAGE * escalation).toInt().coerceAtMost(50)
                 val newBitrate = currentVideoBitrate - max(
                     currentVideoBitrate * scaledPercentage / 100,
-                    MIN_DECREASE_STEP
+                    scaled(MIN_DECREASE_STEP)
                 )
                 consecutiveDecreases++
                 Log.i(TAG, "Write saturation spike: fast=$fastFillRatio, smooth=$smoothFillRatio, esc=${"%.1f".format(escalation)}, reducing by $scaledPercentage% to $newBitrate")
@@ -181,7 +194,7 @@ class RtmpSendDurationBitrateRegulator(
                 nowNs >= nextIncreaseAllowedNs -> {
                 consecutiveDecreases = 0 // Reset escalation on increase
                 val increaseStep = (currentVideoBitrate * INCREASE_PERCENTAGE / 100)
-                    .coerceIn(MIN_INCREASE_STEP, MAX_INCREASE_STEP)
+                    .coerceIn(scaled(MIN_INCREASE_STEP), MAX_INCREASE_STEP)
                 val newBitrate = min(
                     currentVideoBitrate + increaseStep,
                     bitrateRegulatorConfig.videoBitrateRange.upper
