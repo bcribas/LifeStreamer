@@ -922,13 +922,23 @@ function renderLayers(layers, cameras) {
     acts.appendChild(eye);
 
     var prim = document.createElement("button");
-    prim.textContent = "Audio";
+    prim.textContent = l.primary ? "🔊 Audio" : "Audio";
     prim.className = l.primary ? "on" : "";
+    prim.title = "The live's sound comes from this layer: an RTMP source's own sound, else the " +
+      "microphone (or the phone's sound with SYS AUDIO). It also sets the pace of the frames.";
     prim.onclick = function () { api("/api/layer/primary", { layerId: l.id }); };
     acts.appendChild(prim);
 
     head.appendChild(acts);
     panel.appendChild(head);
+
+    if (l.primary) {
+      var sound = document.createElement("div");
+      sound.className = "muted";
+      sound.style.marginTop = "4px";
+      sound.textContent = "The live's sound: " + soundText(state && state.source && state.source.audio, l);
+      panel.appendChild(sound);
+    }
 
     panel.appendChild(buildLayerSourceRow(l));
     panel.appendChild(buildStyleRow(l));
@@ -939,6 +949,18 @@ function renderLayers(layers, cameras) {
   if (!layers || !layers.length) {
     box.innerHTML = '<div class="panel muted">No composition running. Turn it on above.</div>';
   }
+}
+
+/** Where the live's sound comes from, in the operator's words. */
+function soundText(audio, l) {
+  if (audio === "rtmp") return "this RTMP source's own";
+  if (audio === "phone") return "everything the phone plays (SYS AUDIO)";
+  if (audio === "mic") {
+    return (l.source || "").indexOf("rtmp:") === 0
+      ? "the microphone, until screen capture is accepted on the phone"
+      : "the microphone (or Bluetooth)";
+  }
+  return "—";
 }
 
 /**

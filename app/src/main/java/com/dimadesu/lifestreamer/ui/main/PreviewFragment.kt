@@ -1504,12 +1504,12 @@ class PreviewFragment : Fragment(R.layout.main_fragment) {
      * inset will show when it is turned on. The same choices as on the remote page, with the
      * reason next to what cannot be chosen now.
      */
-    private fun showCompositionSourcePicker() {
+    private fun showCompositionSourcePicker(forLayer: String? = null) {
         val composing = previewViewModel.isCompositeSource.value == true
         val layerId: String
         val options: List<com.dimadesu.lifestreamer.sources.SourceController.Option>
         if (composing) {
-            layerId = previewViewModel.layerForSourcePicker() ?: return
+            layerId = forLayer ?: previewViewModel.layerForSourcePicker() ?: return
             options = previewViewModel.layerSourceOptions(layerId)
         } else {
             val preset = previewViewModel.presetSourceOptions() ?: return
@@ -1674,12 +1674,35 @@ class PreviewFragment : Fragment(R.layout.main_fragment) {
                 )
                 setOnClickListener { previewViewModel.selectCompositionLayer(layer.id) }
                 setOnLongClickListener {
-                    previewViewModel.toggleCompositionLayerVisibility(layer.id)
+                    showLayerMenu(layer)
                     true
                 }
             }
             container.addView(chip)
         }
+    }
+
+    /**
+     * What a long press on a layer's chip offers: the live's sound from this layer, hiding it,
+     * and its source.
+     */
+    private fun showLayerMenu(layer: PreviewViewModel.CompositionLayerUi) {
+        val actions = mutableListOf<Pair<String, () -> Unit>>()
+        if (!layer.isPrimary) {
+            actions += "🔊 Use this layer's sound" to { previewViewModel.useLayerForSound(layer.id) }
+        }
+        actions += (if (layer.visible) "Hide" else "Show") to {
+            previewViewModel.toggleCompositionLayerVisibility(layer.id)
+        }
+        actions += "Source…" to {
+            previewViewModel.selectCompositionLayer(layer.id)
+            showCompositionSourcePicker(layer.id)
+        }
+        AlertDialog.Builder(requireContext())
+            .setTitle(layer.label)
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which -> actions[which].second() }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     /**

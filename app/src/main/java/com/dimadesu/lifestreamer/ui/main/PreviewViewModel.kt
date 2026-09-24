@@ -4938,6 +4938,11 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
         compositionController?.swapLayers()
     }
 
+    /** The live's sound (and the pace of the frames) come from [layerId]; see AudioFollower. */
+    fun useLayerForSound(layerId: String) {
+        compositionController?.setPrimaryLayer(layerId)
+    }
+
     fun toggleCompositionLayerVisibility(layerId: String) {
         val visible = activeComposite()?.layoutFlow?.value?.get(layerId)?.visible ?: true
         compositionController?.setLayerVisible(layerId, !visible)
