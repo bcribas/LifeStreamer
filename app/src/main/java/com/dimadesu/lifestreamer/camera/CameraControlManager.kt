@@ -247,6 +247,7 @@ class CameraControlManager(
         val reading = (target.backend as? Camera2Backend)
             ?.takeIf { startsManual && it.isActiveFlow.value }
             ?.exposureReading()
+            ?.also { Log.i(TAG, "${target.id}: auto-exposure is at ISO ${it.iso}, ${it.exposureNs / 1000} µs") }
         return onManager {
             when (key) {
                 ControlKeys.TORCH -> changeRuntime(target) { it.copy(torch = raw == true || raw == "true") }

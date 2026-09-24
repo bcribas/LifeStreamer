@@ -206,7 +206,10 @@ object CameraControlRules {
                 "auto" -> current.copy(manualExposure = null)
                 "manual" -> {
                     if (!caps.manualSensor) throw Refused("This camera has no manual exposure")
-                    fillManual(current, caps, fps, reading)
+                    // Picks up from what auto-exposure is doing now, so the picture does not jump;
+                    // without a reading, from what was remembered
+                    val start = if (reading != null) current.copy(iso = null, exposureNs = null) else current
+                    fillManual(start, caps, fps, reading)
                 }
                 else -> throw Refused("Expected auto or manual")
             }
@@ -333,7 +336,7 @@ object CameraControlRules {
 
         if (caps.manualSensor) {
             controls += ControlDescriptor(
-                ControlKeys.EXPOSURE_MODE, "Exposure", ControlGroup.EXPOSURE, ControlType.CHOICE,
+                ControlKeys.EXPOSURE_MODE, "Mode", ControlGroup.EXPOSURE, ControlType.CHOICE,
                 value = if (manual) "manual" else "auto",
                 options = listOf(ControlOption("auto", "Auto"), ControlOption("manual", "Manual")),
             )
@@ -348,7 +351,7 @@ object CameraControlRules {
         }
         if (caps.aeLockAvailable) {
             controls += ControlDescriptor(
-                ControlKeys.AE_LOCK, "Lock exposure", ControlGroup.EXPOSURE, ControlType.TOGGLE,
+                ControlKeys.AE_LOCK, "Lock", ControlGroup.EXPOSURE, ControlType.TOGGLE,
                 value = v.aeLock == true,
                 enabled = !manual, reason = "Exposure is manual".takeIf { manual },
             )
@@ -370,7 +373,7 @@ object CameraControlRules {
         if (afModes.isNotEmpty()) {
             val afMode = v.afMode ?: defaultAfMode(caps)
             controls += ControlDescriptor(
-                ControlKeys.AF_MODE, "Focus", ControlGroup.FOCUS, ControlType.CHOICE,
+                ControlKeys.AF_MODE, "Mode", ControlGroup.FOCUS, ControlType.CHOICE,
                 value = afModeName(afMode),
                 options = afModes.map { ControlOption(AF_NAMES.getValue(it).first, AF_NAMES.getValue(it).second) },
             )
@@ -389,7 +392,7 @@ object CameraControlRules {
         val awbModes = offeredAwbModes(caps)
         if (awbModes.size > 1) {
             controls += ControlDescriptor(
-                ControlKeys.AWB_MODE, "White balance", ControlGroup.WHITE_BALANCE, ControlType.CHOICE,
+                ControlKeys.AWB_MODE, "Mode", ControlGroup.WHITE_BALANCE, ControlType.CHOICE,
                 value = awbModeName(v.awbMode ?: AWB_AUTO),
                 options = awbModes.map { ControlOption(AWB_NAMES.getValue(it).first, AWB_NAMES.getValue(it).second) },
             )
@@ -397,7 +400,7 @@ object CameraControlRules {
         if (caps.awbLockAvailable) {
             val auto = (v.awbMode ?: AWB_AUTO) == AWB_AUTO
             controls += ControlDescriptor(
-                ControlKeys.AWB_LOCK, "Lock white balance", ControlGroup.WHITE_BALANCE, ControlType.TOGGLE,
+                ControlKeys.AWB_LOCK, "Lock", ControlGroup.WHITE_BALANCE, ControlType.TOGGLE,
                 value = v.awbLock == true, enabled = auto, reason = "Only with Auto".takeIf { !auto },
             )
         }

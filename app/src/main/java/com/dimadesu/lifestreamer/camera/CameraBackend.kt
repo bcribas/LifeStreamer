@@ -46,12 +46,17 @@ class Camera2Backend(val cameraSource: ICameraSource) : CameraBackend {
     /** Read from the characteristics, which need no open camera. */
     val caps: Camera2Caps by lazy { readCaps(settings.characteristics, settings.zoom.availableRatioRange) }
 
-    /** What auto-exposure used on the latest frame; null when no frame comes (nothing is shown). */
+    /**
+     * What auto-exposure used on the latest frame; null when no frame comes (nothing is shown).
+     * Its ISO includes the digital boost it adds after the sensor, which manual exposure leaves
+     * off: without it, switching to manual at "the same" ISO turns the picture darker.
+     */
     suspend fun exposureReading(): ExposureReading? = withTimeoutOrNull(READ_TIMEOUT_MS) {
         val result = settings.captureResultFlow.first()
         val iso = result[CaptureResult.SENSOR_SENSITIVITY]
         val exposureNs = result[CaptureResult.SENSOR_EXPOSURE_TIME]
-        if (iso != null && exposureNs != null) ExposureReading(iso, exposureNs) else null
+        val boost = result[CaptureResult.CONTROL_POST_RAW_SENSITIVITY_BOOST] ?: 100
+        if (iso != null && exposureNs != null) ExposureReading(iso * boost / 100, exposureNs) else null
     }
 
     /**

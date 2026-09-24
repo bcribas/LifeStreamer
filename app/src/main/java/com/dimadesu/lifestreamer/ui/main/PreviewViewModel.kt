@@ -394,22 +394,33 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
         return state.targets.firstOrNull()
     }
 
-    private fun selectedControl(key: String) = selectedCameraTarget()?.controls?.firstOrNull { it.key == key }
-
     /** Sets a control of the selected camera; [onDone] gets the camera's state after it. */
     private fun setCameraControl(
         key: String,
         value: Any?,
         onDone: (com.dimadesu.lifestreamer.camera.CameraControlManager.CameraTargetState?) -> Unit = {}
     ) {
-        val controls = cameraControls ?: return
         val target = selectedCameraTarget() ?: return
+        setCameraControl(target.id, key, value, onDone)
+    }
+
+    /** Sets a control of [targetId]'s camera (the panel names it); a refusal is told. */
+    fun setCameraControl(
+        targetId: String,
+        key: String,
+        value: Any?,
+        onDone: (com.dimadesu.lifestreamer.camera.CameraControlManager.CameraTargetState?) -> Unit = {}
+    ) {
+        val controls = cameraControls ?: return
         viewModelScope.launch {
-            controls.set(target.id, key, value)
-                .onSuccess { onDone(controls.state.value.target(target.id)) }
+            controls.set(targetId, key, value)
+                .onSuccess { onDone(controls.state.value.target(targetId)) }
                 .onFailure { _toastMessageLiveData.postValue(it.message) }
         }
     }
+
+    /** A quick-button change of the selected camera. */
+    fun setSelectedCameraControl(key: String, value: Any?) = setCameraControl(key, value)
 
     val requiredPermissions: List<String>
         get() {
@@ -1402,14 +1413,10 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                             // Screen and USB layers need grants that only this screen can ask for.
                             binder.compositionController().externalPipProvider = this@PreviewViewModel
 
-                            // The sliders follow the cameras' controls, whoever changed them
-                            // (the remote page too)
+                            // The buttons, sliders and panel follow the cameras' controls,
+                            // whoever changed them (the remote page too)
                             viewModelScope.launch {
-                                binder.cameraControls().state.collect {
-                                    notifyPropertyChanged(BR.exposureCompensation)
-                                    notifyPropertyChanged(BR.zoomRatio)
-                                    notifyPropertyChanged(BR.lensDistance)
-                                }
+                                binder.cameraControls().state.collect { _cameraControlsState.postValue(it) }
                             }
                             // The preview may already have been set before the service was
                             // bound (mounted mode does it at start-up), and a report made then
@@ -1556,7 +1563,6 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
 
         viewModelScope.launch {
             currentStreamer.videoInput?.sourceFlow?.collect { source ->
-                notifySourceChanged()
                 onVideoSourceChanged(source)
             }
         }
@@ -1863,11 +1869,6 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                     } ?: Log.i(TAG, "Video is disabled")
                 }
         }
-    }
-
-    /** A pinch on the preview zoomed the camera itself: remember it, so it is not undone. */
-    fun onZoomRationOnPinchChanged(zoomRatio: Float) {
-        setCameraControl(com.dimadesu.lifestreamer.camera.ControlKeys.ZOOM, zoomRatio)
     }
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
@@ -3580,7 +3581,6 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                         // Hide camera-specific sliders when switching away from camera
                         showZoomSlider.value = false
                         showExposureSlider.value = false
-                        showLensDistanceSlider.value = false
 
                         // Hide BT toggle - RTMP uses MediaProjection audio, not microphone
                         _showBluetoothToggle.postValue(false)
@@ -4576,6 +4576,31 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
     private val _selectedCompositionLayerId = MutableLiveData<String?>(null)
     val selectedCompositionLayerId: LiveData<String?> = _selectedCompositionLayerId
 
+    private val _cameraControlsState = MutableLiveData(com.dimadesu.lifestreamer.camera.CameraControlManager.State())
+
+    /** Every camera in use and its controls, for the camera panel. */
+    val cameraControlsState: LiveData<com.dimadesu.lifestreamer.camera.CameraControlManager.State> = _cameraControlsState
+
+    /**
+     * The camera the quick buttons act on: the selected layer's in a composition (none when that
+     * layer is not a camera), or the one camera. Follows the selection, a layer given another
+     * camera, and a camera turning on.
+     */
+    val selectedCameraTargetLive: LiveData<com.dimadesu.lifestreamer.camera.CameraControlManager.CameraTargetState?> =
+        MediatorLiveData<com.dimadesu.lifestreamer.camera.CameraControlManager.CameraTargetState?>().apply {
+            fun update() {
+                val state = _cameraControlsState.value ?: return
+                value = if (_isCompositeSource.value == true) {
+                    state.target(_selectedCompositionLayerId.value ?: CompositionLayers.MAIN)
+                } else {
+                    state.targets.firstOrNull()
+                }
+            }
+            addSource(_cameraControlsState) { update() }
+            addSource(_selectedCompositionLayerId) { update() }
+            addSource(_isCompositeSource) { update() }
+        }
+
     private val _isCompositionEditMode = MutableLiveData(false)
     val isCompositionEditMode: LiveData<Boolean> = _isCompositionEditMode
 
@@ -4882,7 +4907,6 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                     _userToggledUvc.postValue(false)
                     showZoomSlider.value = false
                     showExposureSlider.value = false
-                    showLensDistanceSlider.value = false
                     
                     if (proj != null) {
                         switchToMediaProjectionVideoSource(currentStreamer, proj)
@@ -5075,36 +5099,18 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
             }
         }.asLiveData()
 
-    val isFlashAvailable = MutableLiveData(false)
+    private fun controlOf(
+        target: com.dimadesu.lifestreamer.camera.CameraControlManager.CameraTargetState?,
+        key: String
+    ) = target?.controls?.firstOrNull { it.key == key }
+
+    val isFlashAvailable: LiveData<Boolean> =
+        selectedCameraTargetLive.map { controlOf(it, com.dimadesu.lifestreamer.camera.ControlKeys.TORCH) != null }
+
     fun toggleFlash() {
         val on = selectedCameraTarget()?.runtime?.torch != true
         setCameraControl(com.dimadesu.lifestreamer.camera.ControlKeys.TORCH, on) {
             _toastMessageLiveData.postValue(if (on) "Torch: On" else "Torch: Off")
-        }
-    }
-
-    /** The label of a choice control's current option, for the toasts. */
-    private fun choiceLabel(
-        target: com.dimadesu.lifestreamer.camera.CameraControlManager.CameraTargetState?,
-        key: String
-    ): String? = target?.controls?.firstOrNull { it.key == key }
-        ?.let { control -> control.options?.firstOrNull { it.value == control.value }?.label }
-
-    private fun cycleCameraControl(key: String, onDone: (com.dimadesu.lifestreamer.camera.CameraControlManager.CameraTargetState?) -> Unit) {
-        val controls = cameraControls ?: return
-        val target = selectedCameraTarget() ?: return
-        viewModelScope.launch {
-            controls.cycle(target.id, key)
-                .onSuccess { onDone(controls.state.value.target(target.id)) }
-                .onFailure { _toastMessageLiveData.postValue(it.message) }
-        }
-    }
-
-    val isAutoWhiteBalanceAvailable = MutableLiveData(false)
-    fun toggleAutoWhiteBalanceMode() {
-        val key = com.dimadesu.lifestreamer.camera.ControlKeys.AWB_MODE
-        cycleCameraControl(key) { target ->
-            _toastMessageLiveData.postValue("White Balance: ${choiceLabel(target, key)}")
         }
     }
 
@@ -5113,105 +5119,24 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
         showExposureSlider.postValue(!(showExposureSlider.value)!!)
     }
 
-    val isExposureCompensationAvailable = MutableLiveData(false)
-    val exposureCompensationRange = MutableLiveData<Range<Int>>()
-    val exposureCompensationStep = MutableLiveData<Rational>()
-
-    /** In EV; the camera takes it in index steps. */
-    var exposureCompensation: Float
-        @Bindable get() {
-            val control = selectedControl(com.dimadesu.lifestreamer.camera.ControlKeys.EV) ?: return 0f
-            return ((control.value as? Number)?.toFloat() ?: 0f) * control.scale
-        }
-        set(value) {
-            val step = selectedControl(com.dimadesu.lifestreamer.camera.ControlKeys.EV)?.scale ?: return
-            if (step <= 0f) return
-            setCameraControl(com.dimadesu.lifestreamer.camera.ControlKeys.EV, kotlin.math.round(value / step).toInt())
-        }
+    /** Compensation can be set: the camera has it and exposure is not manual. */
+    val isExposureCompensationAvailable: LiveData<Boolean> =
+        selectedCameraTargetLive.map { controlOf(it, com.dimadesu.lifestreamer.camera.ControlKeys.EV)?.enabled == true }
 
     val showZoomSlider = MutableLiveData(false)
     fun toggleZoomSlider() {
         showZoomSlider.postValue(!(showZoomSlider.value)!!)
     }
 
-    val isZoomAvailable = MutableLiveData(false)
-    val zoomRatioRange = MutableLiveData<Range<Float>>()
-    var zoomRatio: Float
-        @Bindable get() = selectedCameraTarget()?.zoom?.ratio ?: 1f
-        set(value) {
-            setCameraControl(com.dimadesu.lifestreamer.camera.ControlKeys.ZOOM, value)
-        }
+    val isZoomAvailable: LiveData<Boolean> =
+        selectedCameraTargetLive.map { controlOf(it, com.dimadesu.lifestreamer.camera.ControlKeys.ZOOM) != null }
 
-    val isAutoFocusModeAvailable = MutableLiveData(false)
-    fun toggleAutoFocusMode() {
-        val key = com.dimadesu.lifestreamer.camera.ControlKeys.AF_MODE
-        cycleCameraControl(key) { target ->
-            _toastMessageLiveData.postValue("Focus: ${choiceLabel(target, key)}")
-            showLensDistanceSlider.postValue(
-                target?.values?.afMode == CaptureResult.CONTROL_AF_MODE_OFF
-            )
-        }
-    }
+    /** The panel with every control of the camera: for any camera, USB ones included. */
+    val showCameraPanelButton: LiveData<Boolean> = selectedCameraTargetLive.map { it != null }
 
-    val showLensDistanceSlider = MutableLiveData(false)
-    val lensDistanceRange = MutableLiveData<Range<Float>>()
-    var lensDistance: Float
-        @Bindable get() = selectedCameraTarget()?.values?.lensDiopters ?: 0f
-        set(value) {
-            setCameraControl(com.dimadesu.lifestreamer.camera.ControlKeys.LENS, value)
-        }
-
-    private fun notifySourceChanged() {
-        val videoSource = streamer?.videoInput?.sourceFlow?.value ?: return
-        if (videoSource is ICameraSource) {
-            notifyCameraChanged(videoSource)
-        } else {
-            isFlashAvailable.postValue(false)
-            isAutoWhiteBalanceAvailable.postValue(false)
-            isExposureCompensationAvailable.postValue(false)
-            isZoomAvailable.postValue(false)
-            isAutoFocusModeAvailable.postValue(false)
-        }
-    }
-
-    private fun notifyCameraChanged(videoSource: ICameraSource) {
-        val settings = videoSource.settings
-        // Only what the camera can do: its values (and its stabilization) come from the camera
-        // controls, which re-apply what was remembered. Writing defaults here overwrote them.
-
-        // Flash
-        isFlashAvailable.postValue(settings.flash.isAvailable)
-
-        // WB
-        isAutoWhiteBalanceAvailable.postValue(settings.whiteBalance.availableAutoModes.size > 1)
-
-        // Exposure
-        isExposureCompensationAvailable.postValue(
-            !settings.exposure.availableCompensationRange.isEmpty
-        )
-        exposureCompensationRange.postValue(
-            Range(
-                (settings.exposure.availableCompensationRange.lower * settings.exposure.availableCompensationStep.toFloat()).toInt(),
-                (settings.exposure.availableCompensationRange.upper * settings.exposure.availableCompensationStep.toFloat()).toInt()
-            )
-        )
-        exposureCompensationStep.postValue(settings.exposure.availableCompensationStep)
-
-        // Zoom
-        isZoomAvailable.postValue(
-            !settings.zoom.availableRatioRange.isEmpty
-        )
-        zoomRatioRange.postValue(settings.zoom.availableRatioRange)
-
-        // Focus
-        isAutoFocusModeAvailable.postValue(settings.focus.availableAutoModes.size > 1)
-
-        // Lens distance
-        showLensDistanceSlider.postValue(false)
-        lensDistanceRange.postValue(settings.focus.availableLensDistanceRange)
-        notifyPropertyChanged(BR.exposureCompensation)
-        notifyPropertyChanged(BR.zoomRatio)
-        notifyPropertyChanged(BR.lensDistance)
+    /** A pinch on the preview zoomed the camera itself: remember it, so it is not undone. */
+    fun onZoomRationOnPinchChanged(zoomRatio: Float) {
+        setCameraControl(com.dimadesu.lifestreamer.camera.ControlKeys.ZOOM, zoomRatio)
     }
 
     /**

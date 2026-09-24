@@ -70,6 +70,7 @@ import io.github.thibaultbee.streampack.ui.views.PreviewView
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 import android.widget.Toast
 import androidx.core.view.children
 
@@ -283,6 +284,13 @@ class PreviewFragment : Fragment(R.layout.main_fragment) {
                 RemoteControlQrDialog.show(context, pin)
             }
         }
+
+        binding.cameraPanelButton.setOnClickListener {
+            if (childFragmentManager.findFragmentByTag(CameraControlsSheet.TAG) == null) {
+                CameraControlsSheet().show(childFragmentManager, CameraControlsSheet.TAG)
+            }
+        }
+        bindCameraSliders()
 
         // Observe Moblink relay status and push to SrtlaStatsView
         viewLifecycleOwner.lifecycleScope.launch {
@@ -1268,6 +1276,76 @@ class PreviewFragment : Fragment(R.layout.main_fragment) {
                 binding.audioSourceSpinner.setSelection(position)
             }
         }
+    }
+
+    /** Sliders under the finger: the camera's state must not move them. */
+    private val heldSliders = mutableSetOf<com.google.android.material.slider.Slider>()
+
+    /**
+     * The exposure and zoom sliders follow the selected camera: its range, and its value unless a
+     * finger is on them. Set in code rather than bound, because a Slider throws the moment its
+     * value is outside its range or off its step, which a camera change would briefly cause.
+     */
+    private fun bindCameraSliders() {
+        val exposure = binding.exposureSlider
+        val zoom = binding.zoomSlider
+        listOf(exposure, zoom).forEach { slider ->
+            slider.addOnSliderTouchListener(object : com.google.android.material.slider.Slider.OnSliderTouchListener {
+                override fun onStartTrackingTouch(slider: com.google.android.material.slider.Slider) {
+                    heldSliders += slider
+                }
+
+                override fun onStopTrackingTouch(slider: com.google.android.material.slider.Slider) {
+                    heldSliders -= slider
+                }
+            })
+        }
+        exposure.addOnChangeListener { _, value, fromUser ->
+            if (fromUser) {
+                previewViewModel.setSelectedCameraControl(
+                    com.dimadesu.lifestreamer.camera.ControlKeys.EV, value.roundToInt()
+                )
+            }
+        }
+        zoom.addOnChangeListener { _, value, fromUser ->
+            if (fromUser) {
+                previewViewModel.setSelectedCameraControl(com.dimadesu.lifestreamer.camera.ControlKeys.ZOOM, value)
+            }
+        }
+        previewViewModel.selectedCameraTargetLive.observe(viewLifecycleOwner) { target ->
+            val controls = target?.controls.orEmpty().associateBy { it.key }
+            controls[com.dimadesu.lifestreamer.camera.ControlKeys.EV]?.let { ev ->
+                // In the camera's index steps, labelled in EV
+                exposure.setLabelFormatter { com.dimadesu.lifestreamer.camera.ControlText.value(ev, it) }
+                placeSlider(exposure, ev, stepped = true)
+            }
+            controls[com.dimadesu.lifestreamer.camera.ControlKeys.ZOOM]?.let { control ->
+                zoom.setLabelFormatter { com.dimadesu.lifestreamer.camera.ControlText.value(control, it) }
+                placeSlider(zoom, control, stepped = false)
+            }
+        }
+    }
+
+    private fun placeSlider(
+        slider: com.google.android.material.slider.Slider,
+        control: com.dimadesu.lifestreamer.camera.ControlDescriptor,
+        stepped: Boolean
+    ) {
+        if (slider in heldSliders) return
+        val min = control.min ?: return
+        val max = (control.max ?: return).coerceAtLeast(min + 0.01f)
+        // Range and step before the value, and the value inside them
+        slider.stepSize = 0f
+        if (min >= slider.valueTo) {
+            slider.valueTo = max
+            slider.valueFrom = min
+        } else {
+            slider.valueFrom = min
+            slider.valueTo = max
+        }
+        val raw = ((control.value as? Number)?.toFloat() ?: min).coerceIn(min, max)
+        slider.value = if (stepped) raw.roundToInt().toFloat() else raw
+        if (stepped) slider.stepSize = 1f
     }
 
     private fun updateCameraButtonsVisibility() {

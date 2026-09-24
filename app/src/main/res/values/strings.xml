@@ -516,4 +516,10 @@
     <string name="recording_file_endpoint_note_key" translatable="false">recording_file_endpoint_note</string>
     <string name="recording_file_endpoint_note">The destination is a file, so there is no live to record alongside. Pick a streaming destination in Destination and network to use this.</string>
     <string name="video_bitrate_capped_by_regulator">Adaptive bitrate is on: the live starts here, and the target in Destination and network (%1$d kb/s) caps it.</string>
+    <!-- Camera controls panel -->
+    <string name="camera_controls_title">Camera settings</string>
+    <string name="camera_controls_off_note">This camera is off: changes apply when it turns on.</string>
+    <string name="camera_controls_none">No camera in use. In a composition, pick a layer that shows a camera.</string>
+    <string name="camera_controls_reset_confirm">Put %1$s back on automatic? Its remembered zoom, focus, exposure and white balance are cleared.</string>
+    <string name="camera_controls_remembered">Remembered for this camera, and applied whenever it turns on.</string>
 </resources>

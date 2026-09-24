@@ -51,6 +51,17 @@ class CameraControlRulesTest {
     }
 
     @Test
+    fun `switching to manual again starts from the current auto exposure, not a stale one`() {
+        val stale = change(auto, ControlKeys.ISO, 100).copy(manualExposure = null)
+        val values = CameraControlRules.applyChange(
+            stale, ControlKeys.EXPOSURE_MODE, "manual", caps, 30, ExposureReading(iso = 1600, exposureNs = 33_000_000)
+        ).getOrThrow()
+        assertEquals(1600, values.iso)
+        // Without a reading, what was remembered
+        assertEquals(100, change(stale, ControlKeys.EXPOSURE_MODE, "manual").iso)
+    }
+
+    @Test
     fun `a faster live shortens the shutter`() {
         val values = change(auto, ControlKeys.SHUTTER, 1_000_000_000L / 30)
         assertEquals(1_000_000_000L / 30, values.exposureNs)
