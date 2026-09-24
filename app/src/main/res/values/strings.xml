@@ -461,4 +461,26 @@
     <string name="remote_control_qr_message">This code contains the PIN, so anyone who photographs the screen can take control. Close it when the other device is connected.</string>
     <string name="remote_control_qr_waiting">Waiting for Wi-Fi… The code appears as soon as the phone has an address on the network.</string>
     <string name="remote_control_qr_button">Show the remote control QR code</string>
+    <string name="recording_key">recording_key</string>
+    <string name="recording_category_title">Recording</string>
+    <string name="recording_enabled_key">recording_enabled_key</string>
+    <string name="recording_enabled_title">Record while live</string>
+    <string name="recording_enabled_summary">Saves the video to a folder on this phone for as long as the live is on, network drops included, in MPEG-TS segments that each play on their own.</string>
+    <string name="recording_folder_key">recording_folder_key</string>
+    <string name="recording_folder_uri_key">recording_folder_uri_key</string>
+    <string name="recording_folder_title">Folder</string>
+    <string name="recording_folder_none">Pick or create a folder on the SD card</string>
+    <string name="recording_folder_access_lost">Access lost: pick the folder again</string>
+    <string name="recording_mode_key">recording_mode_key</string>
+    <string name="recording_mode_title">Quality</string>
+    <string name="recording_mode_separate">separate</string>
+    <string name="recording_mode_live_copy">live_copy</string>
+    <string name="recording_resolution_key">recording_resolution_key</string>
+    <string name="recording_resolution_title">Recording resolution</string>
+    <string name="recording_resolution_same_as_live">live</string>
+    <string name="recording_resolution_same_as_live_entry">Same as the live</string>
+    <string name="recording_video_bitrate_key">recording_video_bitrate_key</string>
+    <string name="recording_video_bitrate_title">Recording bitrate in kbps</string>
+    <string name="recording_segment_minutes_key">recording_segment_minutes_key</string>
+    <string name="recording_segment_title">Segment length</string>
 </resources>

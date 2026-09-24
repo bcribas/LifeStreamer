@@ -36,6 +36,34 @@
         <item>12</item>
     </string-array>
 
+    <string-array name="RecordingModeEntries">
+        <item>Separate: own encoder, own resolution and bitrate</item>
+        <item>Copy of the live: exactly what is sent (SRT/SRTLA only)</item>
+    </string-array>
+
+    <string-array name="RecordingModeValues">
+        <item>@string/recording_mode_separate</item>
+        <item>@string/recording_mode_live_copy</item>
+    </string-array>
+
+    <string-array name="RecordingSegmentEntries">
+        <item>1 minute</item>
+        <item>2 minutes</item>
+        <item>5 minutes</item>
+        <item>10 minutes</item>
+        <item>15 minutes</item>
+        <item>30 minutes</item>
+    </string-array>
+
+    <string-array name="RecordingSegmentValues">
+        <item>1</item>
+        <item>2</item>
+        <item>5</item>
+        <item>10</item>
+        <item>15</item>
+        <item>30</item>
+    </string-array>
+
     <string-array name="AudioBitrateEntryValues">
         <!-- 32000 and 48000 cap the sample rate (LowBitrateAudio) -->
         <item>32000</item>

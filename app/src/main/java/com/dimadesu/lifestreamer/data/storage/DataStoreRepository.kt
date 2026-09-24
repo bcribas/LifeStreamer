@@ -320,6 +320,62 @@ class DataStoreRepository(
         )
     }.distinctUntilChanged()
 
+    enum class RecordingMode(val id: String) {
+        /** A second encoder with its own resolution and bitrate. */
+        SEPARATE("separate"),
+
+        /** The live's own TS, byte for byte (SRT/SRTLA only). */
+        LIVE_COPY("live_copy");
+
+        companion object {
+            fun fromId(id: String?) = entries.firstOrNull { it.id == id } ?: SEPARATE
+        }
+    }
+
+    /**
+     * Local recording while live.
+     *
+     * @param resolution null means the live's own resolution
+     */
+    data class RecordingConfig(
+        val enabled: Boolean,
+        val folderUri: String?,
+        val mode: RecordingMode,
+        val resolution: Size?,
+        val videoBitrateBps: Int,
+        val segmentDurationMs: Long,
+    )
+
+    val recordingConfigFlow: Flow<RecordingConfig> = dataStore.data.map { preferences ->
+        RecordingConfig(
+            enabled = preferences[booleanPreferencesKey(context.getString(R.string.recording_enabled_key))]
+                ?: false,
+            folderUri = preferences[stringPreferencesKey(context.getString(R.string.recording_folder_uri_key))],
+            mode = RecordingMode.fromId(
+                preferences[stringPreferencesKey(context.getString(R.string.recording_mode_key))]
+            ),
+            resolution = preferences[stringPreferencesKey(context.getString(R.string.recording_resolution_key))]
+                ?.let { runCatching { Size.parseSize(it) }.getOrNull() },
+            videoBitrateBps = (preferences[intPreferencesKey(context.getString(R.string.recording_video_bitrate_key))]
+                ?: 8000) * 1000,
+            segmentDurationMs = (preferences[stringPreferencesKey(context.getString(R.string.recording_segment_minutes_key))]
+                ?.toLongOrNull() ?: 5L) * 60_000L,
+        )
+    }.distinctUntilChanged()
+
+    suspend fun setRecordingEnabled(enabled: Boolean) {
+        dataStore.edit {
+            it[booleanPreferencesKey(context.getString(R.string.recording_enabled_key))] = enabled
+        }
+    }
+
+    suspend fun setRecordingFolderUri(uri: String?) {
+        dataStore.edit {
+            val key = stringPreferencesKey(context.getString(R.string.recording_folder_uri_key))
+            if (uri == null) it.remove(key) else it[key] = uri
+        }
+    }
+
     suspend fun setRemoteControlPin(pin: String) {
         dataStore.edit {
             it[stringPreferencesKey(context.getString(R.string.remote_control_pin_key))] = pin

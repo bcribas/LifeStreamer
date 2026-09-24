@@ -23,6 +23,7 @@ import android.media.MediaFormat
 import android.os.Bundle
 import android.text.InputFilter
 import android.text.InputType
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
@@ -230,6 +231,35 @@ class SettingsFragment : PreferenceFragmentCompat() {
         findPreferenceSafe<EditTextPreference>(R.string.file_name_key) ?: error("file_name_key not found")
     }
 
+    private val recordingCategory: PreferenceCategory by lazy {
+        findPreferenceSafe<PreferenceCategory>(R.string.recording_key) ?: error("recording_key not found")
+    }
+
+    private val recordingFolderPreference: Preference by lazy {
+        findPreferenceSafe<Preference>(R.string.recording_folder_key) ?: error("recording_folder_key not found")
+    }
+
+    private val recordingModePreference: ListPreference by lazy {
+        findPreferenceSafe<ListPreference>(R.string.recording_mode_key) ?: error("recording_mode_key not found")
+    }
+
+    private val recordingResolutionPreference: ListPreference by lazy {
+        findPreferenceSafe<ListPreference>(R.string.recording_resolution_key) ?: error("recording_resolution_key not found")
+    }
+
+    private val recordingBitratePreference: SeekBarPreference by lazy {
+        findPreferenceSafe<SeekBarPreference>(R.string.recording_video_bitrate_key) ?: error("recording_video_bitrate_key not found")
+    }
+
+    /**
+     * The Storage Access Framework folder picker. Registered here, at construction, as the
+     * Activity Result API requires.
+     */
+    private val recordingFolderPicker =
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            if (uri != null) onRecordingFolderPicked(uri)
+        }
+
     override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
         preferenceManager.preferenceDataStore =
             PreferencesDataStoreAdapter(requireContext().dataStore, lifecycleScope)
@@ -297,6 +327,7 @@ class SettingsFragment : PreferenceFragmentCompat() {
                 ) { video, regulator -> video to regulator }
                     .collect { (video, regulator) ->
                         runCatching { updateBitrateWarning(video, regulator) }
+                        runCatching { refreshRecordingResolutions(video?.resolution) }
                     }
             }
         }
@@ -372,6 +403,106 @@ class SettingsFragment : PreferenceFragmentCompat() {
         // whenever this screen comes back.
         runCatching { loadRemoteControlSettings() }
         runCatching { loadPowerSettings() }
+        runCatching { refreshRecordingFolderSummary() }
+    }
+
+    private fun loadRecordingSettings() {
+        recordingFolderPreference.setOnPreferenceClickListener {
+            lifecycleScope.launch {
+                // Opens the picker where the current folder is, when there is one
+                val current = storageRepository.recordingConfigFlow.first().folderUri
+                recordingFolderPicker.launch(current?.let { android.net.Uri.parse(it) })
+            }
+            true
+        }
+        recordingModePreference.setOnPreferenceChangeListener { _, newValue ->
+            applyRecordingModeVisibility(newValue as String)
+            true
+        }
+        applyRecordingModeVisibility(recordingModePreference.value)
+        recordingBitratePreference.setOnPreferenceChangeListener { _, newValue ->
+            val rounded = snapBitrate(newValue as Int)
+            if (rounded != newValue) {
+                recordingBitratePreference.value = rounded
+                false
+            } else {
+                true
+            }
+        }
+        refreshRecordingResolutions(
+            videoResolutionListPreference.value?.let { runCatching { android.util.Size.parseSize(it) }.getOrNull() }
+        )
+        refreshRecordingFolderSummary()
+    }
+
+    /** Resolution and bitrate only mean something for a recording with its own encoder. */
+    private fun applyRecordingModeVisibility(mode: String?) {
+        val separate = mode != getString(R.string.recording_mode_live_copy)
+        recordingResolutionPreference.isVisible = separate
+        recordingBitratePreference.isVisible = separate
+    }
+
+    /**
+     * "Same as the live", then the resolutions this screen offers for the live that have its
+     * shape: the recording shares the live's canvas, so another shape would be stretched.
+     */
+    private fun refreshRecordingResolutions(liveResolution: android.util.Size?) {
+        val sameAsLive = getString(R.string.recording_resolution_same_as_live)
+        val shape = liveResolution?.let { it.width.toDouble() / it.height }
+        val sizes = videoResolutionListPreference.entryValues.orEmpty()
+            .map { it.toString() }
+            .filter { value ->
+                val size = runCatching { android.util.Size.parseSize(value) }.getOrNull() ?: return@filter false
+                shape == null || kotlin.math.abs(size.width.toDouble() / size.height - shape) < 0.02
+            }
+        recordingResolutionPreference.entries =
+            (listOf(getString(R.string.recording_resolution_same_as_live_entry)) + sizes).toTypedArray()
+        recordingResolutionPreference.entryValues = (listOf(sameAsLive) + sizes).toTypedArray()
+        if (recordingResolutionPreference.findIndexOfValue(recordingResolutionPreference.value) < 0) {
+            recordingResolutionPreference.value = sameAsLive
+        }
+        recordingResolutionPreference.refreshStaleSettingUi()
+    }
+
+    private fun onRecordingFolderPicked(uri: android.net.Uri) {
+        val resolver = requireContext().contentResolver
+        val flags = android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+        try {
+            resolver.takePersistableUriPermission(uri, flags)
+        } catch (e: SecurityException) {
+            android.widget.Toast.makeText(
+                requireContext(), "That folder cannot be written to", android.widget.Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+        lifecycleScope.launch {
+            val previous = storageRepository.recordingConfigFlow.first().folderUri
+            if (previous != null && previous != uri.toString()) {
+                runCatching { resolver.releasePersistableUriPermission(android.net.Uri.parse(previous), flags) }
+            }
+            storageRepository.setRecordingFolderUri(uri.toString())
+            refreshRecordingFolderSummary()
+        }
+    }
+
+    /** The folder, its volume and the room left, read off the main thread. */
+    private fun refreshRecordingFolderSummary() {
+        val context = requireContext().applicationContext
+        lifecycleScope.launch {
+            val config = storageRepository.recordingConfigFlow.first()
+            val summary = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val folder = config.folderUri ?: return@withContext getString(R.string.recording_folder_none)
+                val store = com.dimadesu.lifestreamer.recording.SafSegmentStore(context, android.net.Uri.parse(folder))
+                if (!store.hasPermission()) return@withContext getString(R.string.recording_folder_access_lost)
+                val free = store.freeBytes()
+                    ?: return@withContext "${store.label()}\nNot available (card removed?)"
+                val freeGb = free / 1e9
+                val hours = free * 8.0 / (config.videoBitrateBps + 128_000) / 3600
+                "${store.label()}\n%.1f GB free, about %.0f h at the recording bitrate".format(freeGb, hours)
+            }
+            recordingFolderPreference.summary = summary
+        }
     }
 
     private fun loadRemoteControlSettings() {
@@ -1113,6 +1244,8 @@ class SettingsFragment : PreferenceFragmentCompat() {
         rtmpEndpointPreference.isVisible = endpoint.hasRtmpCapabilities
         srtlaEndpointPreference.isVisible = endpoint.hasSrtlaCapabilities
         fileEndpointPreference.isVisible = endpoint.hasFileCapabilities
+        // Recording "while live" means nothing when the endpoint is itself a file
+        recordingCategory.isVisible = !endpoint.hasFileCapabilities
         bitrateRegulationPreference.isVisible = endpoint.hasSrtCapabilities || endpoint.hasSrtlaCapabilities || endpoint.hasRtmpCapabilities
         // The MTU applies to plain SRT and to SRTLA alike, so it belongs to neither category.
         srtTransportPreference.isVisible =
@@ -1179,5 +1312,6 @@ class SettingsFragment : PreferenceFragmentCompat() {
         loadSrtTransportSettings()
         loadRemoteControlSettings()
         loadEndpoint()
+        loadRecordingSettings()
     }
 }
