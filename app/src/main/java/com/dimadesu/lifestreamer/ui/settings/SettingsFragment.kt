@@ -40,6 +40,7 @@ import com.dimadesu.lifestreamer.models.EndpointFactory
 import com.dimadesu.lifestreamer.models.EndpointType
 import com.dimadesu.lifestreamer.models.FileExtension
 import com.dimadesu.lifestreamer.utils.DialogUtils
+import com.dimadesu.lifestreamer.utils.LowBitrateAudio
 import com.dimadesu.lifestreamer.utils.ProfileLevelDisplay
 import com.dimadesu.lifestreamer.utils.StreamerInfoFactory
 import com.dimadesu.lifestreamer.utils.dataStore
@@ -863,18 +864,26 @@ class SettingsFragment : PreferenceFragmentCompat() {
             audioBitrateListPreference.value = "128000"
         }
 
-        // Inflates audio sample rate
-        val sampleRates = streamerInfo.audio.getSupportedSampleRates(encoder)
-        audioSampleRateListPreference.entries =
-            sampleRates.map { "${"%.1f".format(it.toString().toFloat() / 1000)} kHz" }
-                .toTypedArray()
-        audioSampleRateListPreference.entryValues = sampleRates.map { "$it" }.toTypedArray()
-        if (audioSampleRateListPreference.entry == null) {
-            audioSampleRateListPreference.value = when {
-                sampleRates.contains(44100) -> "44100"
-                sampleRates.contains(48000) -> "48000"
-                else -> "${sampleRates.first()}"
+        // Inflates audio sample rate, capped at the low bitrates (see LowBitrateAudio). A bitrate
+        // change re-inflates it, and says so when that lowers the rate already chosen.
+        inflateAudioSampleRates(encoder, audioBitrateListPreference.value?.toIntOrNull())
+        audioBitrateListPreference.setOnPreferenceChangeListener { _, newValue ->
+            val bitrate = (newValue as String).toInt()
+            val before = audioSampleRateListPreference.value
+            inflateAudioSampleRates(encoder, bitrate)
+            val after = audioSampleRateListPreference.value
+            if (after != before && after != null) {
+                android.widget.Toast.makeText(
+                    requireContext(),
+                    getString(
+                        R.string.audio_sample_rate_lowered,
+                        "%.1f".format(after.toFloat() / 1000),
+                        bitrate / 1000
+                    ),
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
             }
+            true
         }
 
         // Inflates audio byte format
@@ -910,6 +919,25 @@ class SettingsFragment : PreferenceFragmentCompat() {
             }
             audioProfileListPreference.value = value.toString()
         }
+    }
+
+    private fun inflateAudioSampleRates(encoder: String, bitrate: Int?) {
+        val cap = bitrate?.let { LowBitrateAudio.maxSampleRate(it) }
+        val supported = streamerInfo.audio.getSupportedSampleRates(encoder).toList()
+        val sampleRates = supported.filter { cap == null || it <= cap }.ifEmpty { supported }
+        audioSampleRateListPreference.entries =
+            sampleRates.map { "${"%.1f".format(it.toString().toFloat() / 1000)} kHz" }
+                .toTypedArray()
+        audioSampleRateListPreference.entryValues = sampleRates.map { "$it" }.toTypedArray()
+        if (audioSampleRateListPreference.entry == null) {
+            audioSampleRateListPreference.value = when {
+                cap != null -> "${sampleRates.max()}"
+                sampleRates.contains(44100) -> "44100"
+                sampleRates.contains(48000) -> "48000"
+                else -> "${sampleRates.first()}"
+            }
+        }
+        audioSampleRateListPreference.refreshStaleSettingUi()
     }
 
     private fun loadEndpoint() {

@@ -128,6 +128,7 @@
     <string name="audio_bitrate_key">audio_bitrate_key</string>
 
     <string name="audio_sample_rate">Sample rate in kHz</string>
+    <string name="audio_sample_rate_lowered">Sample rate lowered to %1$s kHz (the most for %2$d kb/s)</string>
     <string name="audio_sample_rate_key">audio_sample_rate_key</string>
 
     <string name="audio_byte_format">Byte format</string>

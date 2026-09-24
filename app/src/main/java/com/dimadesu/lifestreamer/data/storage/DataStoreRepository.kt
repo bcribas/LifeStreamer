@@ -16,6 +16,7 @@ import com.dimadesu.lifestreamer.ApplicationConstants
 import com.dimadesu.lifestreamer.R
 import com.dimadesu.lifestreamer.models.EndpointType
 import com.dimadesu.lifestreamer.models.FileExtension
+import com.dimadesu.lifestreamer.utils.LowBitrateAudio
 import com.dimadesu.lifestreamer.utils.appendIfNotEndsWith
 import com.dimadesu.lifestreamer.utils.createVideoContentUri
 import io.github.thibaultbee.streampack.core.configuration.BitrateRegulatorConfig
@@ -63,9 +64,13 @@ class DataStoreRepository(
         val channelConfig =
             preferences[stringPreferencesKey(context.getString(R.string.audio_channel_config_key))]?.toInt()
                 ?: ApplicationConstants.Audio.defaultChannelConfig
-        val sampleRate =
+        // Capped here as well as in the settings, so a combination saved before the cap existed
+        // (or left behind by a bitrate change) cannot reach the encoder.
+        val sampleRate = LowBitrateAudio.coerceSampleRate(
+            startBitrate,
             preferences[stringPreferencesKey(context.getString(R.string.audio_sample_rate_key))]?.toInt()
                 ?: ApplicationConstants.Audio.defaultSampleRate
+        )
         val byteFormat =
             preferences[stringPreferencesKey(context.getString(R.string.audio_byte_format_key))]?.toInt()
                 ?: ApplicationConstants.Audio.defaultByteFormat

@@ -37,9 +37,8 @@
     </string-array>
 
     <string-array name="AudioBitrateEntryValues">
-        <!-- No 32000: the SM-G780F's AAC encoder accepts it (inside its 8000-960000 range), then
-             stops taking input at 44.1 kHz mono and never emits a frame, and a receiver like
-             MediaMTX waits for that audio track until it drops the connection. -->
+        <!-- 32000 and 48000 cap the sample rate (LowBitrateAudio) -->
+        <item>32000</item>
         <item>48000</item>
         <item>64000</item>
         <item>96000</item>
