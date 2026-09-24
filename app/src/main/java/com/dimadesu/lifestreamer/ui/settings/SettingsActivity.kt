@@ -17,18 +17,46 @@ package com.dimadesu.lifestreamer.ui.settings
 
 import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
+import androidx.preference.Preference
+import androidx.preference.PreferenceFragmentCompat
 import com.dimadesu.lifestreamer.R
 
-class SettingsActivity : AppCompatActivity() {
+/**
+ * The settings: a short index of sections ([SettingsIndexFragment]), each opening its own page.
+ * The bar shows where the user is and goes back.
+ */
+class SettingsActivity : AppCompatActivity(),
+    PreferenceFragmentCompat.OnPreferenceStartFragmentCallback {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.settings_activity)
+        setSupportActionBar(findViewById(R.id.settings_toolbar))
+        supportActionBar?.setDisplayHomeAsUpEnabled(true)
         if (savedInstanceState == null) {
             supportFragmentManager
                 .beginTransaction()
-                .replace(R.id.settings, SettingsFragment())
+                .replace(R.id.settings, SettingsIndexFragment())
                 .commit()
         }
+    }
+
+    override fun onSupportNavigateUp(): Boolean {
+        onBackPressedDispatcher.onBackPressed()
+        return true
+    }
+
+    override fun onPreferenceStartFragment(
+        caller: PreferenceFragmentCompat,
+        pref: Preference
+    ): Boolean {
+        val fragment = supportFragmentManager.fragmentFactory
+            .instantiate(classLoader, pref.fragment ?: return false)
+        fragment.arguments = pref.extras
+        supportFragmentManager.beginTransaction()
+            .replace(R.id.settings, fragment)
+            .addToBackStack(null)
+            .commit()
+        return true
     }
 }

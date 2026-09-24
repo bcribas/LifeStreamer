@@ -1,0 +1,50 @@
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <Preference
+        app:key="@string/recording_file_endpoint_note_key"
+        app:isPreferenceVisible="false"
+        app:selectable="false"
+        app:summary="@string/recording_file_endpoint_note" />
+
+    <SwitchPreference
+        app:defaultValue="false"
+        app:key="@string/recording_enabled_key"
+        app:title="@string/recording_enabled_title"
+        app:summary="@string/recording_enabled_summary" />
+
+    <Preference
+        app:key="@string/recording_folder_key"
+        app:title="@string/recording_folder_title" />
+
+    <ListPreference
+        app:defaultValue="@string/recording_mode_separate"
+        app:entries="@array/RecordingModeEntries"
+        app:entryValues="@array/RecordingModeValues"
+        app:key="@string/recording_mode_key"
+        app:title="@string/recording_mode_title"
+        app:useSimpleSummaryProvider="true" />
+
+    <ListPreference
+        app:defaultValue="@string/recording_resolution_same_as_live"
+        app:key="@string/recording_resolution_key"
+        app:title="@string/recording_resolution_title"
+        app:useSimpleSummaryProvider="true" />
+
+    <SeekBarPreference
+        android:max="50000"
+        app:defaultValue="8000"
+        app:key="@string/recording_video_bitrate_key"
+        app:min="1000"
+        app:showSeekBarValue="true"
+        app:title="@string/recording_video_bitrate_title" />
+
+    <ListPreference
+        app:defaultValue="5"
+        app:entries="@array/RecordingSegmentEntries"
+        app:entryValues="@array/RecordingSegmentValues"
+        app:key="@string/recording_segment_minutes_key"
+        app:title="@string/recording_segment_title"
+        app:useSimpleSummaryProvider="true" />
+
+</PreferenceScreen>

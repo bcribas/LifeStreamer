@@ -1,0 +1,44 @@
+<!-- The first settings screen: one entry per section, each with a summary of what is set. -->
+<PreferenceScreen xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <Preference
+        app:fragment="com.dimadesu.lifestreamer.ui.settings.DestinationSettingsFragment"
+        app:key="@string/settings_section_destination_key"
+        app:title="@string/settings_section_destination" />
+
+    <Preference
+        app:fragment="com.dimadesu.lifestreamer.ui.settings.VideoSettingsFragment"
+        app:key="@string/settings_section_video_key"
+        app:title="@string/video" />
+
+    <Preference
+        app:fragment="com.dimadesu.lifestreamer.ui.settings.AudioSettingsFragment"
+        app:key="@string/settings_section_audio_key"
+        app:title="@string/audio" />
+
+    <Preference
+        app:fragment="com.dimadesu.lifestreamer.ui.settings.RecordingSettingsFragment"
+        app:key="@string/settings_section_recording_key"
+        app:title="@string/recording_category_title" />
+
+    <Preference
+        app:fragment="com.dimadesu.lifestreamer.ui.settings.RemoteControlSettingsFragment"
+        app:key="@string/settings_section_remote_control_key"
+        app:title="@string/remote_control_category_title" />
+
+    <Preference
+        app:fragment="com.dimadesu.lifestreamer.ui.settings.PowerSettingsFragment"
+        app:key="@string/settings_section_power_key"
+        app:title="@string/settings_section_power" />
+
+    <Preference
+        app:fragment="com.dimadesu.lifestreamer.ui.settings.CompositionSettingsFragment"
+        app:key="@string/settings_section_composition_key"
+        app:title="@string/composition_category_title" />
+
+    <Preference
+        app:fragment="com.dimadesu.lifestreamer.ui.settings.RtmpSourceSettingsFragment"
+        app:key="@string/settings_section_rtmp_source_key"
+        app:title="@string/rtmp_source_category_title" />
+
+</PreferenceScreen>

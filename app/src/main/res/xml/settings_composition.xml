@@ -1,0 +1,9 @@
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <Preference
+        app:key="@string/composition_capabilities_key"
+        app:selectable="false"
+        app:title="@string/composition_capabilities_title" />
+
+</PreferenceScreen>

@@ -487,4 +487,33 @@
     <string name="recording_video_bitrate_title">Recording bitrate in kbps</string>
     <string name="recording_segment_minutes_key">recording_segment_minutes_key</string>
     <string name="recording_segment_title">Segment length</string>
+
+    <!-- Settings sections -->
+    <string name="settings_section_destination_key" translatable="false">settings_section_destination</string>
+    <string name="settings_section_video_key" translatable="false">settings_section_video</string>
+    <string name="settings_section_audio_key" translatable="false">settings_section_audio</string>
+    <string name="settings_section_recording_key" translatable="false">settings_section_recording</string>
+    <string name="settings_section_remote_control_key" translatable="false">settings_section_remote_control</string>
+    <string name="settings_section_power_key" translatable="false">settings_section_power</string>
+    <string name="settings_section_composition_key" translatable="false">settings_section_composition</string>
+    <string name="settings_section_rtmp_source_key" translatable="false">settings_section_rtmp_source</string>
+    <string name="settings_section_destination">Destination and network</string>
+    <string name="settings_section_power">Power and screen</string>
+    <string name="settings_preview_category_title">Preview</string>
+    <string name="settings_choices_moved_title">Changed to fit this destination</string>
+    <string name="settings_summary_on">On</string>
+    <string name="settings_summary_off">Off</string>
+    <string name="settings_summary_adaptive">adaptive %1$d–%2$d kbps</string>
+    <string name="settings_summary_recording_file_endpoint">Not with a file destination</string>
+    <string name="settings_summary_recording_copy">copy of the live</string>
+    <string name="settings_summary_recording_separate">own encoder, %1$d kbps</string>
+    <string name="settings_summary_recording_no_folder">no folder picked</string>
+    <string name="settings_summary_segment">%1$d-min segments</string>
+    <string name="settings_summary_remote_not_running">On, not running (Wi-Fi?)</string>
+    <string name="settings_summary_power_none">Nothing on</string>
+    <string name="settings_summary_composition">What this phone can put in one picture</string>
+    <string name="settings_summary_rtmp_sources">%1$d source(s): %2$s</string>
+    <string name="recording_file_endpoint_note_key" translatable="false">recording_file_endpoint_note</string>
+    <string name="recording_file_endpoint_note">The destination is a file, so there is no live to record alongside. Pick a streaming destination in Destination and network to use this.</string>
+    <string name="video_bitrate_capped_by_regulator">Adaptive bitrate is on: the live starts here, and the target in Destination and network (%1$d kb/s) caps it.</string>
 </resources>

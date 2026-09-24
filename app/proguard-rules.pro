@@ -66,3 +66,7 @@
 # Remote control wire format: flat DTOs serialized with Gson. Without this, R8 renames the fields
 # and the JSON quietly becomes {"a":1,"b":2} with no error anywhere.
 -keep class com.dimadesu.lifestreamer.remote.RemoteDto$* { *; }
+
+# Settings sections: settings_index.xml names them in app:fragment, and the fragment factory
+# loads them by that name. A renamed class would crash when its section is opened.
+-keep class com.dimadesu.lifestreamer.ui.settings.** extends androidx.preference.PreferenceFragmentCompat { <init>(); }

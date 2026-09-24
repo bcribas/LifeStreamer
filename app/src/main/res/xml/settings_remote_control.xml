@@ -1,0 +1,28 @@
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <SwitchPreference
+        app:defaultValue="false"
+        app:key="@string/remote_control_enabled_key"
+        app:title="@string/remote_control_enabled_title"
+        app:summary="@string/remote_control_enabled_summary" />
+
+    <Preference
+        app:key="@string/remote_control_address_key"
+        app:title="@string/remote_control_address_title"
+        app:dependency="@string/remote_control_enabled_key" />
+
+    <EditTextPreference
+        app:defaultValue="@string/default_remote_control_port"
+        app:key="@string/remote_control_port_key"
+        app:title="@string/remote_control_port_title"
+        app:dependency="@string/remote_control_enabled_key"
+        app:useSimpleSummaryProvider="true" />
+
+    <Preference
+        app:key="@string/remote_control_new_pin_key"
+        app:title="@string/remote_control_new_pin_title"
+        app:summary="@string/remote_control_new_pin_summary"
+        app:dependency="@string/remote_control_enabled_key" />
+
+</PreferenceScreen>

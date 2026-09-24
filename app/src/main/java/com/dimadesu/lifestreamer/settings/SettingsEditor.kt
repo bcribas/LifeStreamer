@@ -34,7 +34,7 @@ import kotlinx.coroutines.sync.withLock
  * of range or not among the choices is refused with a reason, and the rest is written together.
  * A stored value the rest of the app could not read never gets in.
  */
-class SettingsEditor(private val context: Context, private val host: Host) {
+class SettingsEditor(private val context: Context, private val host: Host = Idle) {
 
     interface Host {
         /** A live is open (streaming, connecting or reconnecting). */
@@ -50,6 +50,15 @@ class SettingsEditor(private val context: Context, private val host: Host) {
 
         /** Where recordings go, for display; null when no folder is picked. */
         suspend fun recordingFolderLabel(): String?
+    }
+
+    /** For the settings screen, which only uses [reconcileChoices]: nothing streams or runs. */
+    object Idle : Host {
+        override fun isLiveOpen() = false
+        override fun isPipelineBusy() = false
+        override fun isRecording() = false
+        override fun appliedConfigs(): Pair<VideoConfig?, AudioConfig?> = null to null
+        override suspend fun recordingFolderLabel(): String? = null
     }
 
     data class Result(
@@ -396,25 +405,9 @@ class SettingsEditor(private val context: Context, private val host: Host) {
             }
         }
 
-        // Choices that a changed parent no longer offers move to the closest valid one. Only when
-        // a parent changed, and never for a value that was never set (the encoder's own default).
+        // Choices that a changed parent no longer offers move to the closest valid one
         if (accepted.keys.any { it.keyRes in PARENTS }) {
-            for (field in SettingsSchema.fields) {
-                if (field.options == null || accepted.containsKey(field) || !visible(field, values)) continue
-                val current = values[key(field)]?.toString() ?: continue
-                val choices = options(field, values) ?: continue
-                if (choices.isEmpty() || choices.any { it.value == current }) continue
-                val replacementValue = when (field.keyRes) {
-                    // Capped sample rates: the highest allowed
-                    R.string.audio_sample_rate_key -> choices.maxByOrNull { it.value.toIntOrNull() ?: 0 }!!.value
-                    else -> defaultChoice(field, values)?.toString()?.takeIf { d -> choices.any { it.value == d } }
-                        ?: choices.first().value
-                }
-                val label = choices.first { it.value == replacementValue }.label
-                values[key(field)] = replacementValue
-                accepted[field] = replacementValue
-                warnings += "${field.label} changed to $label: $current is not available with the new settings"
-            }
+            warnings += fixChoices(values, accepted)
         }
 
         lowBitrateWarning(values)?.let { warnings += it }
@@ -438,6 +431,51 @@ class SettingsEditor(private val context: Context, private val host: Host) {
         }
         Log.i(TAG, "Remote settings: applied=$applied pending=$pending rejected=${rejected.keys}")
         Result(applied, pending, rejected, warnings)
+    }
+
+    /**
+     * Moves each choice the other [values] no longer offer (a resolution the new encoder lacks) to
+     * the closest valid one, in [values] and [accepted], skipping the ones in [accepted]. A choice
+     * with no value at all (a profile never picked: the encoder chooses) is left alone.
+     *
+     * @return what moved, for the user
+     */
+    private fun fixChoices(values: MutableMap<String, Any?>, accepted: MutableMap<Field, Any>): List<String> {
+        val moved = mutableListOf<String>()
+        for (field in SettingsSchema.fields) {
+            if (field.options == null || accepted.containsKey(field) || !visible(field, values)) continue
+            val current = values[key(field)]?.toString() ?: continue
+            val choices = options(field, values) ?: continue
+            if (choices.isEmpty() || choices.any { it.value == current }) continue
+            val replacementValue = when (field.keyRes) {
+                // Capped sample rates: the highest allowed
+                R.string.audio_sample_rate_key -> choices.maxByOrNull { it.value.toIntOrNull() ?: 0 }!!.value
+                else -> defaultChoice(field, values)?.toString()?.takeIf { d -> choices.any { it.value == d } }
+                    ?: choices.first().value
+            }
+            val label = choices.first { it.value == replacementValue }.label
+            values[key(field)] = replacementValue
+            accepted[field] = replacementValue
+            moved += "${field.group.title} ${field.label.lowercase()}: now $label ($current is not offered)"
+        }
+        return moved
+    }
+
+    /**
+     * After a change made elsewhere (the settings screen's destination type), moves every stored
+     * choice that is no longer offered to the closest valid one, as the remote page's changes do.
+     *
+     * @return what moved, for the user
+     */
+    suspend fun reconcileChoices(): List<String> = mutex.withLock {
+        val values = values(dataStore.data.first())
+        val accepted = linkedMapOf<Field, Any>()
+        val moved = fixChoices(values, accepted)
+        if (accepted.isNotEmpty()) {
+            dataStore.edit { store -> accepted.forEach { (field, value) -> put(store, field, value) } }
+            Log.i(TAG, "Reconciled choices: ${accepted.keys.map { key(it) }}")
+        }
+        moved
     }
 
     /** Whether [field]'s stored value is not what the streamer runs with (so it waits). */
