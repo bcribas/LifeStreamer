@@ -382,6 +382,11 @@ class DataStoreRepository(
         }
     }
 
+    /** Whether SRT reconnects underneath the encoders (ResilientSrtEndpoint). */
+    val resilientSrtLinkFlow: Flow<Boolean> = dataStore.data.map { preferences ->
+        preferences[booleanPreferencesKey(context.getString(R.string.srt_resilient_link_key))] ?: false
+    }.distinctUntilChanged()
+
     /** The SRT MTU, already brought into the range the UI offers. */
     val srtMtuFlow: Flow<Int> = dataStore.data.map { preferences ->
         SrtMtu.coerceMtu(

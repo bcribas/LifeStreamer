@@ -462,6 +462,9 @@
     <string name="remote_control_qr_message">This code contains the PIN, so anyone who photographs the screen can take control. Close it when the other device is connected.</string>
     <string name="remote_control_qr_waiting">Waiting for Wi-Fi… The code appears as soon as the phone has an address on the network.</string>
     <string name="remote_control_qr_button">Show the remote control QR code</string>
+    <string name="srt_resilient_link_key">srt_resilient_link_key</string>
+    <string name="srt_resilient_link_title">Reconnect without restarting the encoders (experimental)</string>
+    <string name="srt_resilient_link_summary">When the connection drops, only the SRT link reconnects: the camera and encoders keep running, the live resumes sooner, and a "copy of the live" recording has no gap. Also reconnects with the app closed. Always on with that recording mode.</string>
     <string name="recording_key">recording_key</string>
     <string name="recording_category_title">Recording</string>
     <string name="recording_enabled_key">recording_enabled_key</string>

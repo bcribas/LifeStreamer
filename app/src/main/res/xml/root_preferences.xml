@@ -465,6 +465,12 @@
                 app:title="@string/srt_mtu_title"
                 app:dialogMessage="@string/srt_mtu_hint" />
 
+            <SwitchPreference
+                app:defaultValue="false"
+                app:key="@string/srt_resilient_link_key"
+                app:title="@string/srt_resilient_link_title"
+                app:summary="@string/srt_resilient_link_summary" />
+
         </PreferenceCategory>
 
         <PreferenceCategory

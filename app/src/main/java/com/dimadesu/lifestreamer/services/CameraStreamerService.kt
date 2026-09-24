@@ -70,7 +70,13 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         override fun create(context: Context): ISingleStreamer {
             return SingleStreamer(
                 context,
-                audioInputMode = StreamerPipeline.AudioInputMode.PUSH
+                audioInputMode = StreamerPipeline.AudioInputMode.PUSH,
+                // Asked on every SRT open: the resilient endpoint when enabled, else built-in
+                endpointFactory = io.github.thibaultbee.streampack.core.elements.endpoints.DynamicEndpointFactory(
+                    srtEndpointOverride = { descriptor ->
+                        (context as? CameraStreamerService)?.srtEndpointFor(descriptor)
+                    }
+                )
             )
         }
     },
@@ -165,6 +171,114 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         com.dimadesu.lifestreamer.recording.RecordingController(
             this, recordingScope, storageRepository
         ) { streamer }
+    }
+
+    /**
+     * The SRT endpoint that reconnects underneath the encoders, used for SRT and SRTLA when
+     * enabled. One instance for the service's life, reopened for every live.
+     */
+    val resilientSrtEndpoint by lazy {
+        io.github.thibaultbee.streampack.ext.srt.elements.endpoints.resilient.ResilientSrtEndpoint(
+            Dispatchers.IO
+        ).apply {
+            keyFrameRequester = {
+                runCatching {
+                    (streamer as? io.github.thibaultbee.streampack.core.streamers.single.IVideoSingleStreamer)
+                        ?.videoEncoder?.requestKeyFrame()
+                }
+            }
+        }
+    }
+
+    /** Setting, or forced by the copy-of-the-live recording. Read on every SRT open. */
+    @Volatile
+    private var resilientLinkEnabled = false
+
+    /** Whether the live now running uses [resilientSrtEndpoint]. */
+    @Volatile
+    var isResilientSessionActive = false
+        private set
+
+    private var resilientNetworkCallback: android.net.ConnectivityManager.NetworkCallback? = null
+
+    /** The resilient link is down while the live runs: the status is CONNECTING, not STREAMING. */
+    private val _linkDown = MutableStateFlow(false)
+    private var lastRegulatedEpoch = 0
+    private var linkMessageClearJob: Job? = null
+
+    /** Called by the endpoint factory on every SRT open. */
+    fun srtEndpointFor(
+        @Suppress("UNUSED_PARAMETER") descriptor: io.github.thibaultbee.streampack.core.configuration.mediadescriptor.MediaDescriptor
+    ): io.github.thibaultbee.streampack.core.elements.endpoints.IEndpointInternal? {
+        isResilientSessionActive = resilientLinkEnabled
+        lastRegulatedEpoch = 0
+        Log.i(TAG, "SRT open: ${if (resilientLinkEnabled) "resilient link" else "built-in endpoint"}")
+        return if (resilientLinkEnabled) resilientSrtEndpoint else null
+    }
+
+    /** STREAMING while the resilient link is down is really CONNECTING. */
+    private fun reconcileStatus(status: StreamStatus): StreamStatus =
+        if (status == StreamStatus.STREAMING && isResilientSessionActive && _linkDown.value) {
+            StreamStatus.CONNECTING
+        } else status
+
+    private fun onLinkState(
+        link: io.github.thibaultbee.streampack.ext.srt.elements.endpoints.resilient.SrtLinkState,
+        streaming: Boolean
+    ) {
+        if (!isResilientSessionActive) return
+        when (link) {
+            is io.github.thibaultbee.streampack.ext.srt.elements.endpoints.resilient.SrtLinkState.Connecting -> {
+                _linkDown.value = true
+                if (!streaming) return
+                linkMessageClearJob?.cancel()
+                val recording = if (recordingController.isActive) " The recording continues." else ""
+                _reconnectionStatusMessage.value = if (link.everConnected) {
+                    "Connection lost, reconnecting (attempt ${link.attempt})…$recording"
+                } else {
+                    "Connecting… (attempt ${link.attempt})" +
+                            (link.lastError?.let { ": $it" } ?: "") + recording
+                }
+                _serviceStreamStatus.value = StreamStatus.CONNECTING
+            }
+
+            is io.github.thibaultbee.streampack.ext.srt.elements.endpoints.resilient.SrtLinkState.Connected -> {
+                _linkDown.value = false
+                if (!streaming) return
+                _serviceStreamStatus.value = StreamStatus.STREAMING
+                if (link.epoch > 1) {
+                    _reconnectionStatusMessage.value = "Reconnected"
+                    linkMessageClearJob?.cancel()
+                    linkMessageClearJob = serviceScope.launch {
+                        delay(3_000)
+                        if (_reconnectionStatusMessage.value == "Reconnected") _reconnectionStatusMessage.value = null
+                    }
+                } else {
+                    _reconnectionStatusMessage.value = null
+                }
+                // A new socket restarts SRT's counters: a new regulator starts from them. The
+                // first connection's regulator is attached by the start path, as always.
+                if (link.epoch > 1 && link.epoch != lastRegulatedEpoch) {
+                    lastRegulatedEpoch = link.epoch
+                    serviceScope.launch(Dispatchers.Default) {
+                        runCatching {
+                            streamConfigurationHelper.attachBitrateRegulator(
+                                streamer as? io.github.thibaultbee.streampack.core.streamers.single.IVideoSingleStreamer,
+                                io.github.thibaultbee.streampack.core.elements.endpoints.MediaSinkType.SRT,
+                                TAG
+                            )
+                        }.onFailure { Log.w(TAG, "Could not reattach the bitrate regulator: ${it.message}") }
+                    }
+                }
+            }
+
+            io.github.thibaultbee.streampack.ext.srt.elements.endpoints.resilient.SrtLinkState.Idle -> {
+                _linkDown.value = false
+                if (_reconnectionStatusMessage.value?.startsWith("Connect") == true) {
+                    _reconnectionStatusMessage.value = null
+                }
+            }
+        }
     }
 
     /**
@@ -534,6 +648,31 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         serviceScope.launch {
             storageRepository.mountedModeFlow.collect { isMountedMode = it }
         }
+        serviceScope.launch {
+            combine(
+                storageRepository.resilientSrtLinkFlow,
+                storageRepository.recordingConfigFlow
+            ) { flag, recording ->
+                flag || (recording.enabled && recording.mode == DataStoreRepository.RecordingMode.LIVE_COPY)
+            }.collect { resilientLinkEnabled = it }
+        }
+        serviceScope.launch {
+            combine(resilientSrtEndpoint.linkStateFlow, streamer.isStreamingFlow) { link, streaming ->
+                link to streaming
+            }.collect { (link, streaming) -> onLinkState(link, streaming) }
+        }
+        // A network that just came up (Wi-Fi back, a new Starlink path) is worth trying at once
+        // rather than at the end of the backoff.
+        runCatching {
+            val callback = object : android.net.ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) {
+                    if (isResilientSessionActive) resilientSrtEndpoint.retryNow()
+                }
+            }
+            getSystemService(android.net.ConnectivityManager::class.java)
+                ?.registerDefaultNetworkCallback(callback)
+            resilientNetworkCallback = callback
+        }.onFailure { Log.w(TAG, "Could not watch the network: ${it.message}") }
         thermalMonitor.start()
         thermalPolicy.start()
 
@@ -694,9 +833,12 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
             val blocked = startBlockedReason()
             return RemoteDto.StreamDto(
                 status = status.name,
-                reconnecting = _isReconnecting.value,
+                reconnecting = _isReconnecting.value || (isResilientSessionActive && _linkDown.value),
                 reconnectionMessage = _reconnectionStatusMessage.value,
-                startedAtMs = streamingStartTime.takeIf { status == StreamStatus.STREAMING },
+                // The session's uptime goes on through a resilient reconnection
+                startedAtMs = streamingStartTime.takeIf {
+                    status == StreamStatus.STREAMING || (isResilientSessionActive && _linkDown.value)
+                },
                 lastError = _lastStreamError.value,
                 canStart = blocked == null,
                 startBlockedReason = blocked
@@ -881,6 +1023,11 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
             Log.w(TAG, "onDestroy: recording shutdown failed: ${t.message}")
         }
         recordingScope.cancel()
+        resilientNetworkCallback?.let { callback ->
+            runCatching {
+                getSystemService(android.net.ConnectivityManager::class.java)?.unregisterNetworkCallback(callback)
+            }
+        }
 
         super.onDestroy()
     }
@@ -1254,8 +1401,12 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
             val reconnecting = _isReconnecting.value
             val streamingNow = streamer.isStreamingFlow.value
             
-            // If we're actively streaming, return STREAMING
-            if (streamingNow) return StreamStatus.STREAMING
+            // If we're actively streaming, return STREAMING -- unless it is the resilient link's
+            // network leg that is down, with the encoders still running
+            if (streamingNow) {
+                return if (isResilientSessionActive && _linkDown.value) StreamStatus.CONNECTING
+                else StreamStatus.STREAMING
+            }
             
             // If reconnecting, always show CONNECTING status
             if (reconnecting) {
@@ -1347,7 +1498,7 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             )
             Log.i(TAG, "Foreground service reinforced with all required service types")
-            try { _serviceStreamStatus.tryEmit(StreamStatus.STREAMING) } catch (_: Throwable) {}
+            try { _serviceStreamStatus.tryEmit(reconcileStatus(StreamStatus.STREAMING)) } catch (_: Throwable) {}
         } catch (e: Exception) {
             Log.w(TAG, "Failed to maintain foreground service state", e)
             try { _serviceStreamStatus.tryEmit(StreamStatus.ERROR) } catch (_: Throwable) {}
@@ -2292,7 +2443,7 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
      */
     fun updateStreamStatus(status: StreamStatus) {
         try {
-            _serviceStreamStatus.tryEmit(status)
+            _serviceStreamStatus.tryEmit(reconcileStatus(status))
             Log.d(TAG, "Service status updated to: $status")
             // Force notification update with new status
             serviceScope.launch {
@@ -2409,7 +2560,7 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
      */
     fun setStreamStatus(status: StreamStatus) {
         Log.d(TAG, "setStreamStatus: $status (isReconnecting=${_isReconnecting.value})")
-        _serviceStreamStatus.value = status
+        _serviceStreamStatus.value = reconcileStatus(status)
     }
 
     // Helper to compute the localized mute/unmute label based on current audio state
