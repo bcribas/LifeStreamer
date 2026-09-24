@@ -226,3 +226,101 @@ class Camera2Backend(val cameraSource: ICameraSource) : CameraBackend {
         }
     }
 }
+
+/**
+ * A USB camera, through its UVC controls. They exist only while the camera is open, and the
+ * camera only while the app's screen is (the helper lives there): the target goes inactive when
+ * it closes. What it can do is read when it opens.
+ */
+class UvcBackend(val uvcSource: com.dimadesu.lifestreamer.uvc.UvcVideoSource) : CameraBackend {
+    override val kind = CameraKind.UVC
+
+    /** The camera model, known once it opens; the same model shares its settings. */
+    override val cameraKey: String get() = CameraControlStore.uvcKey(uvcSource.deviceKey ?: "unknown")
+    override val source: Any get() = uvcSource
+    override val isActiveFlow: StateFlow<Boolean> get() = uvcSource.readyFlow
+
+    /** Read when the camera opens; null until then. */
+    @Volatile
+    var caps: UvcCaps? = null
+
+    suspend fun readCaps(): UvcCaps? = uvcSource.withControl { c ->
+        val controls = mutableMapOf<String, UvcLimits>()
+        fun range(key: String, enabled: Boolean, limits: () -> IntArray?) {
+            if (!enabled) return
+            val l = limits() ?: return
+            if (l.size >= 3 && l[1] > l[0]) controls[key] = UvcLimits(l[0], l[1], l[2].coerceIn(l[0], l[1]))
+        }
+        if (c.isFocusAutoEnable) controls[UvcKeys.FOCUS_AUTO] = UvcLimits(0, 1, 1)
+        if (c.isWhiteBalanceAutoEnable) controls[UvcKeys.WB_AUTO] = UvcLimits(0, 1, 1)
+        if (c.isAutoExposureModeEnable) controls[UvcKeys.AE_AUTO] = UvcLimits(0, 1, 1)
+        range(UvcKeys.ZOOM, c.isZoomAbsoluteEnable) { c.updateZoomAbsoluteLimit() }
+        range(UvcKeys.FOCUS, c.isFocusAbsoluteEnable) { c.updateFocusAbsoluteLimit() }
+        range(UvcKeys.WB, c.isWhiteBalanceEnable) { c.updateWhiteBalanceLimit() }
+        range(UvcKeys.EXPOSURE, c.isExposureTimeAbsoluteEnable) { c.updateExposureTimeAbsoluteLimit() }
+        range(UvcKeys.BRIGHTNESS, c.isBrightnessEnable) { c.updateBrightnessLimit() }
+        range(UvcKeys.CONTRAST, c.isContrastEnable) { c.updateContrastLimit() }
+        range(UvcKeys.SATURATION, c.isSaturationEnable) { c.updateSaturationLimit() }
+        range(UvcKeys.SHARPNESS, c.isSharpnessEnable) { c.updateSharpnessLimit() }
+        range(UvcKeys.GAMMA, c.isGammaEnable) { c.updateGammaLimit() }
+        range(UvcKeys.GAIN, c.isGainEnable) { c.updateGainLimit() }
+        range(UvcKeys.BACKLIGHT, c.isBacklightCompEnable) { c.updateBacklightCompLimit() }
+        range(UvcKeys.HUE, c.isHueEnable) { c.updateHueLimit() }
+        if (c.isPowerlineFrequencyEnable) {
+            c.updatePowerlineFrequencyLimit()?.takeIf { it.size >= 3 }?.let {
+                controls[UvcKeys.POWERLINE] = UvcLimits(it[0], it[1], it[2].coerceIn(it[0], it[1]))
+            }
+        }
+        UvcCaps(controls)
+    }
+
+    /**
+     * Writes what was chosen: the automatic switches first (a manual value is ignored while its
+     * automatic is on), then the values. Nothing chosen is left as the camera has it.
+     */
+    suspend fun apply(values: CameraControlValues) {
+        val uvc = values.uvc
+        if (uvc.isEmpty()) return
+        uvcSource.withControl { c ->
+            uvc[UvcKeys.FOCUS_AUTO]?.let { c.setFocusAuto(it != 0) }
+            uvc[UvcKeys.WB_AUTO]?.let { c.setWhiteBalanceAuto(it != 0) }
+            uvc[UvcKeys.AE_AUTO]?.let { c.setExposureTimeAuto(it != 0) }
+            uvc[UvcKeys.POWERLINE]?.let { c.setPowerlineFrequency(it) }
+            uvc[UvcKeys.FOCUS]?.let { c.setFocusAbsolute(it) }
+            uvc[UvcKeys.WB]?.let { c.setWhiteBalance(it) }
+            uvc[UvcKeys.EXPOSURE]?.let { c.setExposureTimeAbsolute(it) }
+            uvc[UvcKeys.ZOOM]?.let { c.setZoomAbsolute(it) }
+            uvc[UvcKeys.BRIGHTNESS]?.let { c.setBrightness(it) }
+            uvc[UvcKeys.CONTRAST]?.let { c.setContrast(it) }
+            uvc[UvcKeys.SATURATION]?.let { c.setSaturation(it) }
+            uvc[UvcKeys.SHARPNESS]?.let { c.setSharpness(it) }
+            uvc[UvcKeys.GAMMA]?.let { c.setGamma(it) }
+            uvc[UvcKeys.GAIN]?.let { c.setGain(it) }
+            uvc[UvcKeys.BACKLIGHT]?.let { c.setBacklightComp(it) }
+            uvc[UvcKeys.HUE]?.let { c.setHue(it) }
+        }
+    }
+
+    /** Back to the camera's own defaults, for what it has. */
+    suspend fun reset() {
+        val has = caps?.controls?.keys ?: return
+        uvcSource.withControl { c ->
+            if (UvcKeys.FOCUS_AUTO in has) c.resetFocusAuto()
+            if (UvcKeys.WB_AUTO in has) c.resetWhiteBalanceAuto()
+            if (UvcKeys.AE_AUTO in has) c.resetAutoExposureMode()
+            if (UvcKeys.POWERLINE in has) c.resetPowerlineFrequency()
+            if (UvcKeys.FOCUS in has) c.resetFocusAbsolute()
+            if (UvcKeys.WB in has) c.resetWhiteBalance()
+            if (UvcKeys.EXPOSURE in has) c.resetExposureTimeAbsolute()
+            if (UvcKeys.ZOOM in has) c.resetZoomAbsolute()
+            if (UvcKeys.BRIGHTNESS in has) c.resetBrightness()
+            if (UvcKeys.CONTRAST in has) c.resetContrast()
+            if (UvcKeys.SATURATION in has) c.resetSaturation()
+            if (UvcKeys.SHARPNESS in has) c.resetSharpness()
+            if (UvcKeys.GAMMA in has) c.resetGamma()
+            if (UvcKeys.GAIN in has) c.resetGain()
+            if (UvcKeys.BACKLIGHT in has) c.resetBacklightComp()
+            if (UvcKeys.HUE in has) c.resetHue()
+        }
+    }
+}

@@ -7,6 +7,7 @@ import com.dimadesu.lifestreamer.composition.ZoomState
 import io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.ICameraSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.composite.ICompositeVideoSource
+import com.dimadesu.lifestreamer.uvc.UvcVideoSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -130,10 +131,10 @@ class CameraControlManager(
         val source = videoSource()
         if (source is ICompositeVideoSource) {
             return source.layoutFlow.value.layers.mapNotNull { layer ->
-                (source.childSource(layer.id) as? ICameraSource)?.let { layer.id to it }
+                source.childSource(layer.id)?.takeIf { isCamera(it) }?.let { layer.id to it }
             }
         }
-        return listOfNotNull((source as? ICameraSource)?.let { SINGLE to it })
+        return listOfNotNull(source?.takeIf { isCamera(it) }?.let { SINGLE to it })
     }
 
     private fun refreshTargets() {
@@ -156,8 +157,11 @@ class CameraControlManager(
         publish()
     }
 
+    private fun isCamera(source: Any) = source is ICameraSource || source is UvcVideoSource
+
     private fun backendFor(source: Any): CameraBackend? = when (source) {
         is ICameraSource -> Camera2Backend(source)
+        is UvcVideoSource -> UvcBackend(source)
         else -> null
     }
 
@@ -193,6 +197,15 @@ class CameraControlManager(
                         valuesOf(backend.cameraKey), target.runtime, backend.caps, fps(), concurrent()
                     )
                     backend.apply(plan, settle)
+                }
+                is UvcBackend -> {
+                    // What it can do is known once it is open, and may be another model than before
+                    if (settle || backend.caps == null) {
+                        backend.caps = backend.readCaps()
+                        Log.i(TAG, "${target.id}: ${backend.cameraKey} has ${backend.caps?.controls?.keys}")
+                        publish()
+                    }
+                    backend.caps?.let { backend.apply(CameraControlRules.sanitizeUvc(valuesOf(backend.cameraKey), it)) }
                 }
             }
         }.onFailure { Log.w(TAG, "Could not apply to ${target.id}: ${it.message}") }
@@ -262,6 +275,10 @@ class CameraControlManager(
                     when (val backend = target.backend) {
                         is Camera2Backend ->
                             CameraControlRules.applyChange(current, key, raw, backend.caps, fps(), reading)
+                        is UvcBackend -> backend.caps
+                            // The page's zoom is the camera's zoom, whatever the kind
+                            ?.let { CameraControlRules.applyUvcChange(current, if (key == ControlKeys.ZOOM) UvcKeys.ZOOM else key, raw, it) }
+                            ?: Result.failure(CameraControlRules.Refused("The USB camera is not open"))
                     }
                 }.onSuccess {
                     // Choosing a focus mode releases a tapped focus
@@ -279,6 +296,7 @@ class CameraControlManager(
         changeValues(target) { current ->
             when (val backend = target.backend) {
                 is Camera2Backend -> CameraControlRules.cycle(current, key, backend.caps, fps())
+                is UvcBackend -> Result.failure(CameraControlRules.Refused("Nothing to cycle on a USB camera"))
             }
         }
     }
@@ -293,6 +311,14 @@ class CameraControlManager(
             changeValues(target) { current ->
                 when (val backend = target.backend) {
                     is Camera2Backend -> CameraControlRules.nudgeZoom(current, factor, backend.caps, fps())
+                    is UvcBackend -> {
+                        val limits = backend.caps?.controls?.get(UvcKeys.ZOOM)
+                            ?: return@changeValues Result.failure(CameraControlRules.Refused("This camera has no zoom"))
+                        // UVC zoom is a plain range: a pinch moves along it in proportion
+                        val zoom = current.uvc[UvcKeys.ZOOM] ?: limits.default
+                        val next = zoom + (limits.max - limits.min) * (factor - 1f)
+                        CameraControlRules.applyUvcChange(current, UvcKeys.ZOOM, next, backend.caps!!)
+                    }
                 }
             }
         }
@@ -343,6 +369,8 @@ class CameraControlManager(
     }
 
     private fun reset(target: Target) {
+        // A USB camera keeps what was written: put its own defaults back
+        (target.backend as? UvcBackend)?.let { scope.launch { it.reset() } }
         val key = target.backend.cameraKey
         values[key] = CameraControlValues()
         saveJobs.remove(key)?.cancel()
@@ -360,6 +388,7 @@ class CameraControlManager(
     private fun label(target: Target): String {
         val name = when (val backend = target.backend) {
             is Camera2Backend -> composition.displayName(backend.cameraId)
+            is UvcBackend -> "USB camera"
         }
         if (target.id == SINGLE) return name
         val position = composition.positionName(target.id).replaceFirstChar { it.uppercase() }
@@ -386,6 +415,22 @@ class CameraControlManager(
                         zoom = if (caps.zoomMax > caps.zoomMin) {
                             ZoomState(caps.zoomMin, caps.zoomMax, (sanitized.zoom ?: 1f).coerceIn(caps.zoomMin, caps.zoomMax))
                         } else null,
+                    )
+                }
+                is UvcBackend -> {
+                    val caps = backend.caps
+                    CameraTargetState(
+                        id = target.id,
+                        label = label(target),
+                        cameraKey = backend.cameraKey,
+                        kind = backend.kind,
+                        active = backend.isActiveFlow.value,
+                        // Known once it is open
+                        controls = caps?.takeIf { backend.isActiveFlow.value }
+                            ?.let { CameraControlRules.describeUvc(it, current) }.orEmpty(),
+                        values = caps?.let { CameraControlRules.sanitizeUvc(current, it) } ?: current,
+                        runtime = target.runtime,
+                        zoom = null,
                     )
                 }
             }

@@ -101,6 +101,16 @@ class UvcVideoSource(
     @Volatile
     private var isCameraReady = false
 
+    private val _readyFlow = kotlinx.coroutines.flow.MutableStateFlow(false)
+
+    /** Open, with its UVC controls reachable. False again once it closes or the app lets it go. */
+    val readyFlow: StateFlow<Boolean> = _readyFlow
+
+    /** The camera model ("vendor:product"), what its remembered controls are keyed by. */
+    @Volatile
+    var deviceKey: String? = null
+        private set
+
     override val timebase = Timebase.UPTIME
 
     init {
@@ -113,9 +123,11 @@ class UvcVideoSource(
      * Called when the UVC camera has opened and is ready to stream.
      * This re-adds surfaces and starts the preview to ensure frames flow properly.
      */
-    fun onCameraReady() {
+    fun onCameraReady(device: android.hardware.usb.UsbDevice? = null) {
         Log.d(TAG, "onCameraReady() called")
         isCameraReady = true
+        device?.let { deviceKey = com.serenegiant.usb.USBMonitor.getProductKey(it) }
+        _readyFlow.value = true
         
         mainHandler.post {
             try {
@@ -212,11 +224,38 @@ class UvcVideoSource(
         updateCachedFormat()
     }
 
+    /**
+     * The camera closed, or its helper is about to be released (the app's screen went away): its
+     * controls are gone until it opens again.
+     */
+    fun onCameraClosed() {
+        _readyFlow.value = false
+    }
+
+    /**
+     * Runs [block] with the camera's UVC controls, on the thread every helper call uses; null when
+     * the camera is not open. The controls are fetched each time: they die with the camera.
+     */
+    suspend fun <T> withControl(block: (com.serenegiant.usb.UVCControl) -> T): T? =
+        kotlinx.coroutines.suspendCancellableCoroutine { continuation ->
+            mainHandler.post {
+                val result = try {
+                    if (isReleased || !_readyFlow.value || !cameraHelper.isCameraOpened) null
+                    else cameraHelper.uvcControl?.let(block)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "UVC control failed: ${t.message}")
+                    null
+                }
+                continuation.resumeWith(Result.success(result))
+            }
+        }
+
     override suspend fun release() {
         Log.d(TAG, "release() called")
         
         // Mark as released FIRST to prevent any pending operations
         isReleased = true
+        _readyFlow.value = false
         
         // Cancel any pending cleanup to avoid double-release
         cancelPendingCleanup("release")

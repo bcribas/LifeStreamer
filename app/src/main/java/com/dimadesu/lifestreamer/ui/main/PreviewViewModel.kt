@@ -3827,6 +3827,7 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                         
                         // Now explicitly release the CameraHelper since user toggled UVC OFF
                         // (UvcVideoSource.release() no longer releases it to allow reconnection)
+                        markUvcSourcesClosed()
                         uvcCameraHelper?.let { helper ->
                             try {
                                 helper.closeCamera()
@@ -3857,6 +3858,7 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                         Log.d(TAG, "Saved camera ID: $lastUsedCameraId")
                         
                         // Release any existing CameraHelper before creating a new one
+                        markUvcSourcesClosed()
                         uvcCameraHelper?.let { oldHelper ->
                             try {
                                 oldHelper.closeCamera()
@@ -3983,7 +3985,7 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                                     // re-add surfaces and start preview properly
                                     val videoSource = currentStreamer.videoInput?.sourceFlow?.value
                                     if (videoSource is UvcVideoSource) {
-                                        videoSource.onCameraReady()
+                                        videoSource.onCameraReady(device)
                                     } else {
                                         // Fallback: just call startPreview on CameraHelper directly
                                         Log.d(TAG, "Video source is not UvcVideoSource, calling startPreview directly")
@@ -3993,6 +3995,7 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                                 
                                 override fun onCameraClose(device: android.hardware.usb.UsbDevice) {
                                     Log.d(TAG, "UVC camera closed")
+                                    markUvcSourcesClosed()
                                 }
                                 
                                 override fun onDeviceClose(device: android.hardware.usb.UsbDevice) {
@@ -4483,11 +4486,11 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                     // The source has to re-add its surfaces once the device is really ready.
                     val layerSource = activeComposite()?.childSource(COMPOSITION_LAYER_PIP)
                     if (layerSource is UvcVideoSource) {
-                        layerSource.onCameraReady()
+                        layerSource.onCameraReady(device)
                     }
                 }
 
-                override fun onCameraClose(device: android.hardware.usb.UsbDevice) = Unit
+                override fun onCameraClose(device: android.hardware.usb.UsbDevice) = markUvcSourcesClosed()
 
                 override fun onDeviceClose(device: android.hardware.usb.UsbDevice) = Unit
 
@@ -4552,6 +4555,12 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
     }
 
     // endregion
+
+    /** The USB camera sources in use (the source, or a layer's), told their camera is gone. */
+    private fun markUvcSourcesClosed() {
+        (serviceStreamer?.videoInput?.sourceFlow?.value as? UvcVideoSource)?.onCameraClosed()
+        (activeComposite()?.childSource(COMPOSITION_LAYER_PIP) as? UvcVideoSource)?.onCameraClosed()
+    }
 
     private fun isCompositionUsbLayerWanted(): Boolean =
         _isCompositeSource.value == true && compositionPipSource == PipSourceKind.USB
@@ -5251,7 +5260,9 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
         rtmpDisconnectListener = null
         currentRtmpPlayer = null
         
-        // Clean up UVC camera helper
+        // Clean up UVC camera helper. A USB layer can outlive this screen in the composition:
+        // its controls go with the helper
+        markUvcSourcesClosed()
         uvcCameraHelper?.let { helper ->
             try {
                 helper.stopPreview()
