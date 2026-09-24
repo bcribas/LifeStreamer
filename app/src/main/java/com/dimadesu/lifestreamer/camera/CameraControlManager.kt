@@ -298,6 +298,18 @@ class CameraControlManager(
         }
     }
 
+    /**
+     * Focuses (and meters) [targetId]'s camera on [tap], and holds it there until a focus mode is
+     * chosen or the camera turns off. With the focus set by hand, nothing changes.
+     */
+    fun tapToMeter(targetId: String?, tap: TapFocus) {
+        scope.launch {
+            val target = resolve(targetId) ?: return@launch
+            if (target.backend !is Camera2Backend) return@launch
+            changeRuntime(target) { it.copy(tapFocus = tap) }
+        }
+    }
+
     /** Called when the cameras' frame rate changes: a manual exposure may no longer fit a frame. */
     fun onFrameRateChanged() {
         scope.launch {

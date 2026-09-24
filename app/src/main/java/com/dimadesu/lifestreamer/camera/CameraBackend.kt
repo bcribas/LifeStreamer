@@ -46,6 +46,9 @@ class Camera2Backend(val cameraSource: ICameraSource) : CameraBackend {
     /** Read from the characteristics, which need no open camera. */
     val caps: Camera2Caps by lazy { readCaps(settings.characteristics, settings.zoom.availableRatioRange) }
 
+    /** The tap whose focus was last triggered: a new one triggers again, a held one does not. */
+    private var triggeredTap: TapFocus? = null
+
     /**
      * What auto-exposure used on the latest frame; null when no frame comes (nothing is shown).
      * Its ISO includes the digital boost it adds after the sensor, which manual exposure leaves
@@ -73,6 +76,10 @@ class Camera2Backend(val cameraSource: ICameraSource) : CameraBackend {
             if (isActiveFlow.value) write(plan, locks = true)
         }
         if (!isActiveFlow.value) return
+        if (plan.tap != null && plan.tap != triggeredTap && plan.afMode == CameraMetadata.CONTROL_AF_MODE_AUTO) {
+            triggerFocus()
+        }
+        triggeredTap = plan.tap
         // Through StreamPack's zoom, so its own idea of the ratio (used before API 30) follows.
         // It waits for a capture result there, which never comes without frames: bounded.
         withTimeoutOrNull(ZOOM_TIMEOUT_MS) { settings.zoom.setZoomRatio(plan.zoom) }
@@ -92,6 +99,7 @@ class Camera2Backend(val cameraSource: ICameraSource) : CameraBackend {
         if (caps.aeLockAvailable) settings.set(CaptureRequest.CONTROL_AE_LOCK, plan.aeLock && locks)
         settings.set(CaptureRequest.CONTROL_AF_MODE, plan.afMode)
         settings.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_IDLE)
+        writeRegions(plan, manual)
         plan.lensDiopters?.let { settings.set(CaptureRequest.LENS_FOCUS_DISTANCE, it) }
         settings.set(CaptureRequest.CONTROL_AWB_MODE, plan.awbMode)
         if (caps.awbLockAvailable) settings.set(CaptureRequest.CONTROL_AWB_LOCK, plan.awbLock && locks)
@@ -119,6 +127,45 @@ class Camera2Backend(val cameraSource: ICameraSource) : CameraBackend {
         settings.applyRepeatingSession()
     }
 
+    /**
+     * Focus and exposure on the tapped point, or on the whole picture again. Exposure only while
+     * it is automatic and unlocked, focus only while it is not set by hand.
+     */
+    private suspend fun writeRegions(plan: Camera2Plan, manual: Boolean) {
+        // Before Android 11 the zoom crops the sensor itself, and the regions must follow it
+        val zoom = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) 1f else plan.zoom
+        val region = plan.tap?.let { MeteringMath.regionFor(it, caps, zoom) }
+            ?.let {
+                arrayOf(
+                    android.hardware.camera2.params.MeteringRectangle(
+                        android.graphics.Rect(it.left, it.top, it.right, it.bottom),
+                        android.hardware.camera2.params.MeteringRectangle.METERING_WEIGHT_MAX
+                    )
+                )
+            }
+        if (caps.maxRegionsAf > 0) {
+            settings.set(
+                CaptureRequest.CONTROL_AF_REGIONS,
+                region.takeIf { plan.afMode != CameraMetadata.CONTROL_AF_MODE_OFF }
+            )
+        }
+        if (caps.maxRegionsAe > 0) {
+            settings.set(CaptureRequest.CONTROL_AE_REGIONS, region.takeIf { !manual && !plan.aeLock })
+        }
+    }
+
+    /**
+     * Starts one focus on the regions just written. The trigger goes out with one frame; left in
+     * the repeating request it would restart the focus on every frame.
+     */
+    private suspend fun triggerFocus() {
+        Log.i(TAG, "Camera $cameraId: focusing on ${settings.get(CaptureRequest.CONTROL_AF_REGIONS)?.firstOrNull()}")
+        settings.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START)
+        withTimeoutOrNull(TRIGGER_TIMEOUT_MS) { settings.applyRepeatingSessionSync() }
+        settings.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_IDLE)
+        settings.applyRepeatingSession()
+    }
+
     private suspend fun waitForConvergence() {
         withTimeoutOrNull(SETTLE_TIMEOUT_MS) {
             settings.captureResultFlow.first { result ->
@@ -136,6 +183,7 @@ class Camera2Backend(val cameraSource: ICameraSource) : CameraBackend {
         private const val READ_TIMEOUT_MS = 500L
         private const val ZOOM_TIMEOUT_MS = 1_000L
         private const val SETTLE_TIMEOUT_MS = 1_500L
+        private const val TRIGGER_TIMEOUT_MS = 1_000L
 
         fun readCaps(c: CameraCharacteristics, zoomRange: Range<Float>): Camera2Caps {
             val capabilities = c[CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES]?.toList().orEmpty()

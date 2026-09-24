@@ -99,8 +99,17 @@ data class CameraControlValues(
     val isAutomatic: Boolean get() = this == CameraControlValues()
 }
 
-/** A point the operator tapped, normalized to the camera's frame as delivered (0..1, y down). */
-data class TapFocus(val x: Float, val y: Float)
+/**
+ * A point the operator tapped, normalized to the camera's frame as shown upright (0..1, y down),
+ * with what it takes to find it on the sensor: the screen's rotation and the frame's shape.
+ */
+data class TapFocus(
+    val x: Float,
+    val y: Float,
+    val displayRotation: Int = 0,
+    /** Width over height of the frame as shown. */
+    val frameAspect: Float = 16f / 9f,
+)
 
 /** What is never remembered: the torch, and a focus held on a tapped point. */
 data class RuntimeControls(val torch: Boolean = false, val tapFocus: TapFocus? = null)

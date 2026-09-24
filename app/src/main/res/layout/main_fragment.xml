@@ -20,7 +20,7 @@
             android:id="@+id/preview"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            app:enableZoomOnPinch="true"
+            app:enableZoomOnPinch="false"
             app:layout_constraintBottom_toBottomOf="parent"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"
@@ -33,6 +33,19 @@
           normalized layer rectangle maps to a pixel by a plain multiply. GONE unless editing, so
           it cannot swallow a touch meant for the preview.
         -->
+        <!-- Tap to focus and pinch to zoom, on the layer under the finger. Sized and scaled
+             like the overlay below (PreviewFragment.applyPreviewScale), so a touch is a point on
+             the canvas; hidden while the layout is being edited. No elevation: the buttons laid
+             over the preview come later and must keep their touches. -->
+        <com.dimadesu.lifestreamer.ui.components.CameraGestureView
+            android:id="@+id/cameraGestures"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent" />
+
         <com.dimadesu.lifestreamer.ui.components.CompositionOverlayView
             android:id="@+id/compositionOverlay"
             android:layout_width="match_parent"
@@ -467,7 +480,7 @@
             android:layout_height="wrap_content"
             android:visibility="gone"
             app:layout_constraintBottom_toTopOf="@+id/liveButton"
-            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintEnd_toStartOf="@+id/settingsScrollView"
             app:layout_constraintStart_toStartOf="parent" />
 
         <ToggleButton

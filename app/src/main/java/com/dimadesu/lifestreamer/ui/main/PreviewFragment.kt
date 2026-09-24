@@ -291,6 +291,30 @@ class PreviewFragment : Fragment(R.layout.main_fragment) {
             }
         }
         bindCameraSliders()
+        binding.cameraGestures.listener = object : com.dimadesu.lifestreamer.ui.components.CameraGestureView.Listener {
+            private fun aspect(): Float {
+                val view = binding.cameraGestures
+                return if (view.height > 0) view.width.toFloat() / view.height else 16f / 9f
+            }
+
+            private fun displayRotation(): Int {
+                @Suppress("DEPRECATION")
+                val rotation = requireActivity().windowManager.defaultDisplay.rotation
+                return rotation * 90
+            }
+
+            override fun onTap(x: Float, y: Float) {
+                previewViewModel.onPreviewTap(x, y, aspect(), displayRotation())
+            }
+
+            override fun onPinchStart(x: Float, y: Float) {
+                previewViewModel.onPreviewPinchStart(x, y, aspect())
+            }
+
+            override fun onPinch(factor: Float) {
+                previewViewModel.onPreviewPinch(factor)
+            }
+        }
 
         // Observe Moblink relay status and push to SrtlaStatsView
         viewLifecycleOwner.lifecycleScope.launch {
@@ -773,6 +797,7 @@ class PreviewFragment : Fragment(R.layout.main_fragment) {
         // rectangle would be drawn where the layer is not. Giving it identical layout params,
         // pivot and scale makes that true by construction rather than by arithmetic.
         applyScaleTo(binding.compositionOverlay, targetW, targetH)
+        applyScaleTo(binding.cameraGestures, targetW, targetH)
     }
 
     /**
@@ -984,13 +1009,12 @@ class PreviewFragment : Fragment(R.layout.main_fragment) {
             }
         }
 
-        // Keep zoom slider in sync when the user pinch-zooms on the preview.
-        // The listener is dispatched on the main thread (PreviewView wraps it with post{}).
-        preview.setZoomListener(object : CameraSettings.Zoom.OnZoomChangedListener {
-            override fun onZoomChanged(zoomRatio: Float) {
-                previewViewModel.onZoomRationOnPinchChanged(zoomRatio)
-            }
-        })
+        // The preview's own pinch zoom and tap-to-focus go straight to the camera, around the
+        // camera controls, which would then undo them (and its zoom listener echoed every zoom
+        // the controls applied back as a pinch). The gesture layer above it does both, through
+        // the controls, in a composition too.
+        preview.enableZoomOnPinch = false
+        preview.enableTapToFocus = false
 
         // If the preview already uses the same streamer, no need to set it again.
         lifecycleScope.launch {
@@ -1503,9 +1527,6 @@ class PreviewFragment : Fragment(R.layout.main_fragment) {
     }
 
     private var editModeTimeoutRunnable: Runnable? = null
-    private var previewZoomDefault = true
-    private var previewFocusDefault = true
-    private var hasCapturedPreviewGestureDefaults = false
 
     private fun setUpCompositionBar() {
         val bar = binding.compositionBar
@@ -1564,20 +1585,12 @@ class PreviewFragment : Fragment(R.layout.main_fragment) {
     }
 
     /**
-     * Edit mode has to take the gestures away from the preview, which already consumes pinch for
-     * camera zoom and single taps for focus. Both are plain properties on PreviewView, so this
-     * needs no fork of StreamPack — but the previous values are captured rather than assumed, so a
-     * change to the layout defaults cannot silently break them.
+     * Edit mode takes taps and drags for the layers themselves, so the camera gestures (tap to
+     * focus, pinch to zoom) step aside while it is on.
      */
     private fun applyEditMode(editing: Boolean) {
-        if (editing && !hasCapturedPreviewGestureDefaults) {
-            previewZoomDefault = binding.preview.enableZoomOnPinch
-            previewFocusDefault = binding.preview.enableTapToFocus
-            hasCapturedPreviewGestureDefaults = true
-        }
-
-        binding.preview.enableZoomOnPinch = if (editing) false else previewZoomDefault
-        binding.preview.enableTapToFocus = if (editing) false else previewFocusDefault
+        // While editing, a tap picks and a drag moves a layer: the camera gestures step aside
+        binding.cameraGestures.visibility = if (editing) View.GONE else View.VISIBLE
         binding.compositionOverlay.visibility = if (editing) View.VISIBLE else View.GONE
 
         if (editing) {

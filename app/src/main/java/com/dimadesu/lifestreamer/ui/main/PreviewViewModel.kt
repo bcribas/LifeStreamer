@@ -5134,9 +5134,58 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
     /** The panel with every control of the camera: for any camera, USB ones included. */
     val showCameraPanelButton: LiveData<Boolean> = selectedCameraTargetLive.map { it != null }
 
-    /** A pinch on the preview zoomed the camera itself: remember it, so it is not undone. */
-    fun onZoomRationOnPinchChanged(zoomRatio: Float) {
-        setCameraControl(com.dimadesu.lifestreamer.camera.ControlKeys.ZOOM, zoomRatio)
+    /**
+     * The layer under ([x], [y]) (canvas fractions) and the point on its camera's frame; null in
+     * the bars of a fitted layer or on the background.
+     */
+    private fun layerAt(x: Float, y: Float, aspect: Float): com.dimadesu.lifestreamer.camera.LayerTapMapper.Hit? {
+        val layout = activeComposite()?.layoutFlow?.value ?: return null
+        val layers = layout.layers.map {
+            com.dimadesu.lifestreamer.camera.LayerTapMapper.Layer(
+                it.id, it.rect.left, it.rect.top, it.rect.right, it.rect.bottom, it.z,
+                it.visible, it.scaleMode.name, it.mirror, it.rotationDegrees
+            )
+        }
+        return com.dimadesu.lifestreamer.camera.LayerTapMapper.hit(layers, x, y, aspect)
+    }
+
+    /**
+     * A tap on the preview: focuses the camera under it there (the one camera, or the layer's),
+     * and in a composition selects that layer, so the buttons follow it.
+     *
+     * @param aspect the preview's width over height, which is the stream's
+     * @param displayRotation the screen's rotation in degrees
+     */
+    fun onPreviewTap(x: Float, y: Float, aspect: Float, displayRotation: Int) {
+        val controls = cameraControls ?: return
+        if (activeComposite() == null) {
+            controls.tapToMeter(null, com.dimadesu.lifestreamer.camera.TapFocus(x, y, displayRotation, aspect))
+            return
+        }
+        val hit = layerAt(x, y, aspect) ?: return
+        selectCompositionLayer(hit.layerId)
+        controls.tapToMeter(hit.layerId, com.dimadesu.lifestreamer.camera.TapFocus(hit.x, hit.y, displayRotation, aspect))
+    }
+
+    /** The camera a pinch zooms: the one under where it began; none on the background. */
+    private var pinchTarget: String? = null
+    private var pinchAllowed = false
+
+    fun onPreviewPinchStart(x: Float, y: Float, aspect: Float) {
+        if (activeComposite() == null) {
+            pinchTarget = null
+            pinchAllowed = true
+            return
+        }
+        val hit = layerAt(x, y, aspect)
+        pinchTarget = hit?.layerId
+        pinchAllowed = hit != null
+        hit?.let { selectCompositionLayer(it.layerId) }
+    }
+
+    /** Remembered like any zoom, through the camera controls. */
+    fun onPreviewPinch(factor: Float) {
+        if (pinchAllowed) cameraControls?.nudgeZoom(pinchTarget, factor)
     }
 
     /**
