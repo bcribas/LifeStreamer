@@ -126,4 +126,8 @@ object RemoteControlManager {
     fun broadcastMessage(text: String) {
         server?.broadcastMessage(text)
     }
+
+    fun broadcastSettingsChanged() {
+        server?.broadcastSettingsChanged()
+    }
 }

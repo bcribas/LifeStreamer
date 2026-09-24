@@ -847,6 +847,13 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                 SrtlaManager.start(getApplication(), srtlaConfig.receiverHost, srtlaConfig.receiverPort, srtlaConfig.listenPort)
             }
 
+            // A configuration changed while the previous live ran, or from the remote page, is
+            // applied now, while nothing streams yet. Not on a reconnection: that is the same
+            // live resuming, and reconfiguring the camera would only delay it.
+            if (service?.isReconnecting?.value != true) {
+                service?.applyStoredConfigBeforeStart()
+            }
+
             // Before the live opens: the recording's encoder can still shape the sources then.
             // Idempotent, so a reconnection, which comes through here too, leaves it running.
             service?.recordingController?.onLiveStarting()

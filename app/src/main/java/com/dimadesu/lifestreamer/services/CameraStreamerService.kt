@@ -173,6 +173,34 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         )
     }
 
+    /** Reads and changes settings for the remote page, with the settings screen's rules. */
+    private val settingsEditor by lazy {
+        com.dimadesu.lifestreamer.settings.SettingsEditor(this, object : com.dimadesu.lifestreamer.settings.SettingsEditor.Host {
+            override fun isLiveOpen(): Boolean {
+                val status = getEffectiveServiceStatus()
+                return _isReconnecting.value || status == StreamStatus.STREAMING ||
+                        status == StreamStatus.CONNECTING || status == StreamStatus.STARTING
+            }
+
+            override fun isPipelineBusy() = this@CameraStreamerService.isPipelineBusy()
+
+            override fun isRecording() = recordingController.isActive
+
+            override fun appliedConfigs() =
+                (streamer as? IVideoSingleStreamer)?.videoConfigFlow?.value to
+                        (streamer as? io.github.thibaultbee.streampack.core.streamers.single.IAudioSingleStreamer)?.audioConfigFlow?.value
+
+            override suspend fun recordingFolderLabel(): String? =
+                storageRepository.recordingConfigFlow.first().folderUri?.let {
+                    runCatching {
+                        com.dimadesu.lifestreamer.recording.SafSegmentStore.describe(
+                            this@CameraStreamerService, android.net.Uri.parse(it)
+                        )
+                    }.getOrNull()
+                }
+        })
+    }
+
     /** The copy of the live taps the resilient SRT endpoint's TS. */
     private val liveCopyHost = object : com.dimadesu.lifestreamer.recording.RecordingController.LiveCopyHost {
         override suspend fun liveCopyBlockedReason(liveOpen: Boolean): String? {
@@ -763,6 +791,13 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
             thermalMonitor.stateFlow.collect { RemoteControlManager.broadcastState() }
         }
         serviceScope.launch {
+            // Any setting changed, here or from a page: the pages fetch them again
+            dataStore.data.drop(1).collectLatest {
+                delay(300)
+                RemoteControlManager.broadcastSettingsChanged()
+            }
+        }
+        serviceScope.launch {
             // Also what creates the controller, so its state (armed or not) is known from the start
             recordingController.statusFlow.collect {
                 RemoteControlManager.broadcastState()
@@ -898,6 +933,23 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         override fun setRecordingEnabled(enabled: Boolean): String? = runBlocking {
             recordingController.setEnabled(enabled)
         }
+
+        // Request threads too: reading the capabilities queries the codecs and cameras.
+        override fun settings(): RemoteDto.SettingsDto = runBlocking(Dispatchers.Default) {
+            settingsEditor.snapshot()
+        }
+
+        override fun applySettings(changes: Map<String, Any?>): RemoteDto.SettingsResultDto =
+            runBlocking(Dispatchers.Default) {
+                val result = settingsEditor.apply(changes)
+                RemoteDto.SettingsResultDto(
+                    ok = result.rejected.isEmpty(),
+                    applied = result.applied,
+                    pending = result.pending,
+                    rejected = result.rejected,
+                    warnings = result.warnings
+                )
+            }
 
         override fun power(): RemoteDto.PowerDto = RemoteDto.PowerDto(
             previewEnabled = previewEnabledState,
@@ -1761,13 +1813,20 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
      * empty. The phone on a windscreen is exactly that case. Not streaming here, so nothing on air
      * is reconfigured; a later catch-up by the ViewModel applies the same values again.
      */
-    private suspend fun ensureStreamerConfigured() {
+    private suspend fun ensureStreamerConfigured(alsoWhenChanged: Boolean = false) {
         val current = streamer
+        // The sources cannot be reconfigured while anything streams (a recording can outlive a live)
+        if (alsoWhenChanged && isPipelineBusy()) return
         val videoStreamer = current as? IVideoSingleStreamer
-        if (videoStreamer != null && videoStreamer.videoConfigFlow.value == null) {
-            storageRepository.videoConfigFlow.first()?.let { config ->
+        if (videoStreamer != null) {
+            val applied = videoStreamer.videoConfigFlow.value
+            storageRepository.videoConfigFlow.first()?.takeIf { stored ->
+                applied == null || (alsoWhenChanged && stored != applied)
+            }?.let { config ->
                 runCatching { videoStreamer.setVideoConfig(config) }
-                    .onSuccess { Log.i(TAG, "Applied the stored video configuration (none was set)") }
+                    .onSuccess {
+                        Log.i(TAG, "Applied the stored video configuration (${if (applied == null) "none was set" else "it changed"})")
+                    }
                     .onFailure { Log.w(TAG, "Could not apply the stored video configuration: ${it.message}") }
             }
         }
@@ -1775,14 +1834,34 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         val micGranted = androidx.core.content.ContextCompat.checkSelfPermission(
             this, android.Manifest.permission.RECORD_AUDIO
         ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-        if (audioStreamer != null && audioStreamer.audioConfigFlow.value == null && micGranted) {
-            storageRepository.audioConfigFlow.first()?.let { config ->
+        if (audioStreamer != null && micGranted) {
+            val applied = audioStreamer.audioConfigFlow.value
+            storageRepository.audioConfigFlow.first()?.takeIf { stored ->
+                applied == null || (alsoWhenChanged && stored != applied)
+            }?.let { config ->
                 runCatching { audioStreamer.setAudioConfig(config) }
-                    .onSuccess { Log.i(TAG, "Applied the stored audio configuration (none was set)") }
+                    .onSuccess {
+                        Log.i(TAG, "Applied the stored audio configuration (${if (applied == null) "none was set" else "it changed"})")
+                    }
                     .onFailure { Log.w(TAG, "Could not apply the stored audio configuration: ${it.message}") }
             }
         }
     }
+
+    /** Whether the sources stream, for the live or a recording that outlived it. */
+    fun isPipelineBusy(): Boolean {
+        val current = streamer
+        return (current as? io.github.thibaultbee.streampack.core.streamers.single.ISecondaryOutputStreamer)
+            ?.isPipelineStreamingFlow?.value
+            ?: current.isStreamingFlow.value
+    }
+
+    /**
+     * Brings the streamer to the stored configuration before a live opens. A change made while
+     * the previous live ran, or with the app's screen away (from the remote page), would
+     * otherwise never be applied: the screen only applies changes while it is up and idle.
+     */
+    suspend fun applyStoredConfigBeforeStart() = ensureStreamerConfigured(alsoWhenChanged = true)
 
     /**
      * Replaces the whole video source, the way the app's screen always did it: the bitrate
@@ -2015,8 +2094,9 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
             }
 
             // Encoders are created from the configuration, which may never have been applied
-            // if the app started with the phone locked.
-            ensureStreamerConfigured()
+            // if the app started with the phone locked, or changed since (the remote page, or
+            // the settings while the previous live ran).
+            ensureStreamerConfigured(alsoWhenChanged = true)
 
             // Read configured endpoint descriptor
             val descriptor = try {

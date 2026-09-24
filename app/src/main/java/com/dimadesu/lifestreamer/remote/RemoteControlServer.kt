@@ -72,6 +72,9 @@ class RemoteControlServer(
         /** @return null when accepted, otherwise why the recording cannot be turned on. */
         fun setRecordingEnabled(enabled: Boolean): String?
 
+        fun settings(): RemoteDto.SettingsDto
+        fun applySettings(changes: Map<String, Any?>): RemoteDto.SettingsResultDto
+
         /** @return null when the start was accepted, otherwise why it was refused. */
         fun startStream(): String?
         fun stopStream()
@@ -388,7 +391,10 @@ class RemoteControlServer(
         var handedOff = false
 
         try {
-            val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
+            // Bytes, not a character reader: Content-Length counts bytes, and a body with any
+            // non-ASCII character (an accented stream ID) read as characters waited for more
+            // than the browser sent until the socket timed out.
+            val reader = java.io.BufferedInputStream(socket.getInputStream())
             val output = BufferedOutputStream(socket.getOutputStream())
 
             // Keep-alive: a browser reuses the connection for every command.
@@ -421,11 +427,26 @@ class RemoteControlServer(
         val path: String,
         val query: Map<String, String>,
         val headers: Map<String, String>,
-        val body: String
+        val body: String,
+        /** The body was over [MAX_BODY_BYTES] and was not read. */
+        val tooLarge: Boolean = false
     )
 
-    private fun readRequest(reader: BufferedReader): Request? {
-        val requestLine = reader.readLine() ?: return null
+    /** One header line, without its line break; ASCII by HTTP's rules. */
+    private fun readLine(input: java.io.InputStream): String? {
+        val line = java.io.ByteArrayOutputStream(128)
+        while (true) {
+            val b = input.read()
+            if (b < 0) return if (line.size() == 0) null else line.toString("ISO-8859-1")
+            if (b == '\n'.code) break
+            if (b != '\r'.code) line.write(b)
+            if (line.size() > MAX_LINE_BYTES) throw IOException("Header line too long")
+        }
+        return line.toString("ISO-8859-1")
+    }
+
+    private fun readRequest(reader: java.io.InputStream): Request? {
+        val requestLine = readLine(reader) ?: return null
         if (requestLine.isBlank()) {
             return null
         }
@@ -449,7 +470,7 @@ class RemoteControlServer(
 
         val headers = mutableMapOf<String, String>()
         while (true) {
-            val line = reader.readLine() ?: break
+            val line = readLine(reader) ?: break
             if (line.isEmpty()) {
                 break
             }
@@ -458,15 +479,20 @@ class RemoteControlServer(
         }
 
         val length = headers["content-length"]?.toIntOrNull() ?: 0
+        // Refused unread, before any authentication: nobody gets to make the phone allocate an
+        // arbitrary buffer by claiming a large body.
+        if (length > MAX_BODY_BYTES) {
+            return Request(method, path, query, headers, "", tooLarge = true)
+        }
         val body = if (length > 0) {
-            val buffer = CharArray(length)
+            val buffer = ByteArray(length)
             var read = 0
             while (read < length) {
                 val n = reader.read(buffer, read, length - read)
                 if (n < 0) break
                 read += n
             }
-            String(buffer, 0, read)
+            String(buffer, 0, read, Charsets.UTF_8)
         } else {
             ""
         }
@@ -480,6 +506,11 @@ class RemoteControlServer(
         socket: Socket,
         output: BufferedOutputStream
     ): RouteResult {
+        if (request.tooLarge) {
+            // The unread body is still on the wire, so the connection cannot be reused
+            respondJson(output, 413, RemoteDto.ErrorResponse("too_large"))
+            return RouteResult.CLOSE
+        }
         if (request.path == "/" || request.path == "/index.html") {
             val acceptsGzip = request.headers["accept-encoding"]?.contains("gzip", ignoreCase = true) == true
             if (acceptsGzip) {
@@ -714,6 +745,20 @@ class RemoteControlServer(
             "/api/stream/stop" -> {
                 hooks.stopStream()
                 respondJson(output, 202, RemoteDto.OkResponse(true))
+            }
+
+            "/api/settings" -> when (request.method) {
+                "GET" -> respondJson(output, 200, hooks.settings())
+                "POST" -> {
+                    val changes = parse<RemoteDto.SettingsRequest>(request.body)?.changes
+                    if (changes.isNullOrEmpty()) {
+                        respondJson(output, 400, RemoteDto.OkResponse(false, "No changes"))
+                    } else {
+                        val result = hooks.applySettings(changes)
+                        respondJson(output, if (result.rejected.isEmpty()) 200 else 422, result)
+                    }
+                }
+                else -> respondJson(output, 405, RemoteDto.ErrorResponse("method_not_allowed"))
             }
 
             "/api/recording" -> {
@@ -997,6 +1042,22 @@ class RemoteControlServer(
      * Pushes a message to every connected page, so a refusal reaches the remote operator rather
      * than looking like a tap that did nothing.
      */
+    /**
+     * Tells the pages the settings changed (on the phone, or from another page): they fetch them
+     * again. Not part of the state, whose fingerprint would change with every setting.
+     */
+    fun broadcastSettingsChanged() {
+        if (eventClients.isEmpty()) return
+        runCatching {
+            pushExecutor.execute {
+                eventClients.forEach { client ->
+                    runCatching { client.send("settings", "{}") }
+                        .onFailure { dropClient(client, "settings push failed", it) }
+                }
+            }
+        }
+    }
+
     fun broadcastMessage(text: String) {
         if (eventClients.isEmpty()) {
             return
@@ -1091,6 +1152,10 @@ class RemoteControlServer(
          * Event streams set their own timeout to zero once handed off.
          */
         private const val SOCKET_TIMEOUT_MS = 30_000
+
+        /** The largest request body read: a settings change is well under 2 KB. */
+        private const val MAX_BODY_BYTES = 16 * 1024
+        private const val MAX_LINE_BYTES = 8 * 1024
 
         /** Slightly under the socket timeout, so the browser closes before the server does. */
         private const val KEEP_ALIVE_ADVERTISED_S = 25

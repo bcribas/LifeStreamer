@@ -224,6 +224,70 @@ object RemoteDto {
     @Keep
     data class RecordingRequest(val enabled: Boolean? = null)
 
+    // region settings
+
+    @Keep
+    data class SettingOptionDto(val value: String, val label: String)
+
+    /**
+     * One editable setting. A secret carries no value: only whether it is set, and a hint.
+     */
+    @Keep
+    data class SettingFieldDto(
+        val key: String,
+        val label: String,
+        /** int, string or bool. */
+        val type: String,
+        val value: Any?,
+        val secret: Boolean,
+        val isSet: Boolean?,
+        val hint: String?,
+        val options: List<SettingOptionDto>?,
+        val min: Int?,
+        val max: Int?,
+        val unit: String?,
+        /** text, host, port, latency_ms or mtu. */
+        val format: String,
+        /** now, when_idle, next_live or next_recording. */
+        val applies: String,
+        val help: String?,
+        /** Saved but not in use yet: it takes effect when the live (or recording) stops or starts again. */
+        val pending: Boolean
+    )
+
+    @Keep
+    data class SettingsGroupDto(
+        val id: String,
+        val title: String,
+        val fields: List<SettingFieldDto>,
+        val note: String?
+    )
+
+    @Keep
+    data class SettingsDto(
+        /** A live is open: the destination cannot change now. */
+        val live: Boolean,
+        /** Something streams (live or recording): video and audio changes wait for it to stop. */
+        val busy: Boolean,
+        val groups: List<SettingsGroupDto>,
+        val recordingFolder: String?
+    )
+
+    /** Changes by key. For a secret, "" leaves it as it is and null clears it. */
+    @Keep
+    data class SettingsRequest(val changes: Map<String, Any?>? = null)
+
+    @Keep
+    data class SettingsResultDto(
+        val ok: Boolean,
+        val applied: List<String>,
+        val pending: List<String>,
+        val rejected: Map<String, String>,
+        val warnings: List<String>
+    )
+
+    // endregion
+
     @Keep
     data class CompositionRequest(val enabled: Boolean? = null)
 
