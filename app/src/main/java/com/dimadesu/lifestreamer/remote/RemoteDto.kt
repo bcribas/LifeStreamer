@@ -45,7 +45,9 @@ object RemoteDto {
         /** #RRGGBB, or null when there is no composition. */
         val backgroundColor: String?,
         val pipSources: List<PipSourceDto>,
-        val recording: RecordingDto
+        val recording: RecordingDto,
+        /** Every camera in use and its controls: each camera layer, or the one camera. */
+        val cameraTargets: List<CameraTargetDto> = emptyList()
     )
 
     /**
@@ -210,6 +212,49 @@ object RemoteDto {
 
     @Keep
     data class LayerCameraRequest(val layerId: String? = null, val cameraId: String? = null)
+
+    /**
+     * One camera and its controls. [id] is what /api/camera takes: a layer id, or "camera" when
+     * there is no composition.
+     */
+    @Keep
+    data class CameraTargetDto(
+        val id: String,
+        val label: String,
+        val cameraKey: String,
+        val kind: String,
+        /** Off (preview off and not live): changes wait for it to turn on. */
+        val active: Boolean,
+        val controls: List<CameraControlDto>
+    )
+
+    /** See camera.ControlDescriptor: the phone's panel is drawn from the same description. */
+    @Keep
+    data class CameraControlDto(
+        val key: String,
+        val label: String,
+        val group: String,
+        /** choice, toggle, range or action */
+        val type: String,
+        val value: Any?,
+        val options: List<SettingOptionDto>?,
+        val min: Float?,
+        val max: Float?,
+        val step: Float?,
+        val format: String,
+        val scale: Float,
+        val unit: String?,
+        val enabled: Boolean,
+        val reason: String?
+    )
+
+    /** Sets [key] of [target]'s camera to [value]; "reset" puts it back on automatic. */
+    @Keep
+    data class CameraControlRequest(
+        val target: String? = null,
+        val key: String? = null,
+        val value: Any? = null
+    )
 
     @Keep
     data class ZoomRequest(

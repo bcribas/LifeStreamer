@@ -684,6 +684,32 @@ class RemoteControlServer(
                 respondJson(output, 200, RemoteDto.OkResponse(true))
             }
 
+            "/api/camera" -> {
+                val body = parse<RemoteDto.CameraControlRequest>(request.body)
+                val key = body?.key
+                if (key.isNullOrBlank()) {
+                    respondJson(output, 400, RemoteDto.OkResponse(false, "Missing key"))
+                    return
+                }
+                // Validated and stored on the controls' own thread, which never waits on a
+                // camera, so this answers at once; the camera itself is set asynchronously
+                val result = runCatching {
+                    kotlinx.coroutines.runBlocking {
+                        kotlinx.coroutines.withTimeout(CAMERA_CONTROL_TIMEOUT_MS) {
+                            cameraControls.set(body.target, key, body.value)
+                        }
+                    }
+                }.getOrElse { Result.failure(it) }
+                val error = result.exceptionOrNull()
+                val status = when (error) {
+                    null -> 200
+                    is NoSuchElementException -> 404
+                    is IllegalArgumentException -> 400
+                    else -> 500
+                }
+                respondJson(output, status, RemoteDto.OkResponse(error == null, error?.message))
+            }
+
             "/api/composition" -> {
                 val enabled = parse<RemoteDto.CompositionRequest>(request.body)?.enabled
                 if (enabled == null) {
@@ -906,9 +932,40 @@ class RemoteControlServer(
                     reason = it.reason,
                     active = it.kind == controller.pipSource.value
                 )
-            }
+            },
+            cameraTargets = cameraTargets()
         )
     }
+
+    /** The camera controls, rounded like the zoom so a value cannot jitter the fingerprint. */
+    private fun cameraTargets(): List<RemoteDto.CameraTargetDto> =
+        cameraControls.state.value.targets.map { target ->
+            RemoteDto.CameraTargetDto(
+                id = target.id,
+                label = target.label,
+                cameraKey = target.cameraKey,
+                kind = target.kind.name.lowercase(),
+                active = target.active,
+                controls = target.controls.map { c ->
+                    RemoteDto.CameraControlDto(
+                        key = c.key,
+                        label = c.label,
+                        group = c.group,
+                        type = c.type.name.lowercase(),
+                        value = (c.value as? Float)?.let(::round2) ?: c.value,
+                        options = c.options?.map { RemoteDto.SettingOptionDto(it.value, it.label) },
+                        min = c.min?.let(::round2),
+                        max = c.max?.let(::round2),
+                        step = c.step,
+                        format = c.format,
+                        scale = c.scale,
+                        unit = c.unit,
+                        enabled = c.enabled,
+                        reason = c.reason
+                    )
+                }
+            )
+        }
 
     /**
      * Opens an event stream on this socket and takes ownership of it.
@@ -1141,6 +1198,7 @@ class RemoteControlServer(
         private const val MIN_PUSH_INTERVAL_MS = 100L
 
         private const val CAMERA_SWITCH_TIMEOUT_MS = 8_000L
+        private const val CAMERA_CONTROL_TIMEOUT_MS = 3_000L
 
         /**
          * How long an idle keep-alive connection may hold a request thread.

@@ -97,6 +97,11 @@
   #confirmOk.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
 
   .seg button { min-height: 36px; padding: 6px 10px; }
+  .cam-group { font-size: 12px; font-weight: 600; color: var(--dim); text-transform: uppercase;
+               letter-spacing: .06em; margin: 12px 0 2px; }
+  .cam-field .ctl input[type=range] { flex: 1; min-width: 0; }
+  .cam-field.wide { grid-template-columns: 1fr; }
+  .cam-field .cam-value { min-width: 56px; text-align: right; }
   .swatch { width: 36px; min-height: 36px; padding: 0; border: 2px solid var(--line); }
   .swatch.on { border-color: var(--accent); }
   input[type=color] { width: 44px; height: 36px; border: 1px solid var(--line); border-radius: 6px;
@@ -206,8 +211,8 @@
         </div>
       </div>
       <div>
-        <h2>Zoom</h2>
-        <div class="panel" id="zoomBox"><div class="muted">Select a camera layer</div></div>
+        <h2>Camera</h2>
+        <div class="panel" id="camBox"><div class="muted">No camera in use</div></div>
       </div>
     </div>
   </section>
@@ -288,7 +293,6 @@ var events = null;
 var dragging = null;
 var pendingRect = null;
 var rectInFlight = false;
-var zoomHeld = false;
 
 // Live stats arrive on their own event every two seconds; the uptime is interpolated in between
 // from the phone's own count, so a clock difference between phone and browser cannot skew it.
@@ -299,8 +303,12 @@ var liveStatsAt = 0;
 var styleHeld = false;
 var pendingStyle = null;
 var styleInFlight = false;
-var pendingZoom = null;
-var zoomInFlight = false;
+// The camera panel: which camera it shows, what is under a finger, and one request in flight per
+// control with the newest value waiting (like the zoom used to be).
+var camTarget = null;
+var camHeld = {};
+var camPending = {};
+var camInFlight = {};
 
 function api(path, body, method) {
   var verb = method || "POST";
@@ -421,7 +429,7 @@ function render(s) {
   renderPresets(s.presets, s.activePresetId);
   renderStage(s.layers);
   renderLayers(s.layers, s.cameras);
-  renderZoom(s.layers);
+  renderCamera(s.cameraTargets);
   renderPower(s.power);
 
   var mute = document.getElementById("mute");
@@ -905,128 +913,238 @@ function renderLayers(layers, cameras) {
   }
 }
 
-function renderZoom(layers) {
-  var box = document.getElementById("zoomBox");
-  var zoomable = (layers || []).filter(function (l) { return l.zoom; });
+var CAM_GROUPS = { zoom: "Zoom", exposure: "Exposure", focus: "Focus", wb: "White balance",
+                  image: "Image", light: "Light", general: "" };
 
-  if (!zoomable.length) {
-    var hasCamera = (layers || []).some(function (l) { return l.cameraId; });
-    // With the preview off and not live, a composition's cameras are idle and have no zoom to
-    // read; saying so beats a message that looks like the cameras are missing.
-    box.innerHTML = '<div class="muted">' + (hasCamera
-      ? "Zoom is available while the cameras run: with the preview on, or live."
-      : "No camera layer to zoom") + '</div>';
+/** How a value reads; mirrors the phone's ControlText. */
+function fmtControl(c, v) {
+  if (c.format === "zoom") return v.toFixed(1) + "×";
+  if (c.format === "ev") { var ev = v * c.scale; return (ev >= 0 ? "+" : "") + ev.toFixed(1) + " EV"; }
+  if (c.format === "distance") return v <= 0.01 ? "∞" : (1 / v).toFixed(2) + " m";
+  var n = v * c.scale;
+  var text = c.scale === 1 ? String(Math.round(n)) : n.toFixed(1);
+  return c.unit ? text + " " + c.unit : text;
+}
+
+function optionLabel(c, value) {
+  var o = (c.options || []).filter(function (x) { return x.value === value; })[0];
+  return o ? o.label : "Auto";
+}
+
+/**
+ * Every control of one camera, drawn from its description (the phone's panel uses the same).
+ * With a composition, one camera per camera layer; without, the one camera.
+ */
+function renderCamera(targets) {
+  var box = document.getElementById("camBox");
+  targets = targets || [];
+  if (!targets.length) {
+    box.innerHTML = '<div class="muted">No camera in use. In a composition, only the layers that show a camera have controls.</div>';
     box.dataset.for = "";
     return;
   }
-
-  // The zoom used to follow the invisible "selected" layer, so with nothing selected the panel
-  // said "Select a camera layer" and there was no way from here to say which layer it meant.
-  var layer = zoomable.filter(function (l) { return l.id === selected; })[0] || zoomable[0];
-  var slider = box.querySelector("input");
-  var signature = layer.id + "|" + (layer.zoom.cameraId || "") + "|" + layer.zoom.min + "|" + layer.zoom.max;
-
-  // Rebuild when the layer or its camera changed. The old guard skipped every rebuild once a
-  // slider existed, so the handle never moved and the range stayed on the previous camera's.
+  // The layer picked on the stage, when it is a camera; else the one picked here; else the first
+  var byId = function (id) { return targets.filter(function (t) { return t.id === id; })[0]; };
+  var target = byId(selected) || byId(camTarget) || targets[0];
+  camTarget = target.id;
+  var signature = targets.map(function (t) { return t.id + ":" + t.label; }).join("|") + "@" +
+    target.id + "|" + target.cameraKey + "|" + target.active + "|" +
+    target.controls.map(function (c) {
+      return [c.key, c.type, c.min, c.max, c.options ? c.options.length : 0, c.enabled].join(",");
+    }).join(";");
   if (box.dataset.for !== signature) {
     box.dataset.for = signature;
-    box.innerHTML = "";
+    buildCamera(box, targets, target);
+  } else {
+    updateCamera(box, target);
+  }
+}
 
+function buildCamera(box, targets, target) {
+  box.innerHTML = "";
+  if (targets.length > 1) {
     var picker = document.createElement("div");
-    picker.className = "row";
-    zoomable.forEach(function (l) {
-      var t = document.createElement("button");
-      t.textContent = l.label;
-      if (l.id === layer.id) t.className = "on";
-      t.onclick = function () { selected = l.id; render(state); };
-      picker.appendChild(t);
+    picker.className = "row seg";
+    targets.forEach(function (t) {
+      var b = document.createElement("button");
+      b.textContent = t.label;
+      if (t.id === target.id) b.className = "on";
+      b.onclick = function () { camTarget = t.id; selected = t.id; render(state); };
+      picker.appendChild(b);
     });
     box.appendChild(picker);
+  }
+  var note = document.createElement("div");
+  note.className = "muted";
+  note.style.margin = "6px 0 2px";
+  note.textContent = target.active
+    ? "Remembered for this camera, and applied whenever it turns on."
+    : "This camera is off (preview off and not live): changes apply when it turns on.";
+  box.appendChild(note);
 
-    var row = document.createElement("div");
-    row.className = "row";
-    row.style.alignItems = "center";
-    row.style.marginTop = "6px";
+  var group = null;
+  target.controls.forEach(function (c) {
+    if (c.group !== group) {
+      group = c.group;
+      if (CAM_GROUPS[group]) {
+        var h = document.createElement("div");
+        h.className = "cam-group";
+        h.textContent = CAM_GROUPS[group];
+        box.appendChild(h);
+      }
+    }
+    box.appendChild(buildCameraControl(target, c));
+  });
+  updateCamera(box, target);
+}
 
-    var minus = document.createElement("button");
-    minus.textContent = "−";
-    minus.onclick = function () { nudge(layer.id, 1 / 1.25); };
+function buildCameraControl(target, c) {
+  var row = document.createElement("div");
+  row.className = "field cam-field";
+  row.dataset.key = c.key;
+  var label = document.createElement("label");
+  label.textContent = c.label;
+  row.appendChild(label);
+  var ctl = document.createElement("div");
+  ctl.className = "ctl";
+  row.appendChild(ctl);
 
-    slider = document.createElement("input");
+  // Sliders take the whole row, under their label
+  if (c.type === "range") row.className += " wide";
+  if (c.type === "choice" && (c.options || []).length <= 3) {
+    var seg = document.createElement("div");
+    seg.className = "row seg";
+    (c.options || []).forEach(function (o) {
+      var b = document.createElement("button");
+      b.textContent = o.label;
+      b.dataset.value = o.value;
+      b.disabled = !c.enabled;
+      b.onclick = function () { sendCamera(target.id, c.key, o.value); };
+      seg.appendChild(b);
+    });
+    ctl.appendChild(seg);
+  } else if (c.type === "choice") {
+    var select = document.createElement("select");
+    var auto = document.createElement("option");
+    auto.value = "";
+    auto.textContent = "Auto";
+    select.appendChild(auto);
+    (c.options || []).forEach(function (o) {
+      var opt = document.createElement("option");
+      opt.value = o.value;
+      opt.textContent = o.label;
+      select.appendChild(opt);
+    });
+    select.disabled = !c.enabled;
+    select.onfocus = function () { camHeld[c.key] = true; };
+    select.onblur = function () { camHeld[c.key] = false; };
+    select.onchange = function () { if (select.value !== "") sendCamera(target.id, c.key, select.value); };
+    ctl.appendChild(select);
+  } else if (c.type === "toggle") {
+    var t = document.createElement("button");
+    t.className = "toggle";
+    t.disabled = !c.enabled;
+    t.onclick = function () { sendCamera(target.id, c.key, !t.classList.contains("on")); };
+    ctl.appendChild(t);
+  } else if (c.type === "range") {
+    if (c.key === "zoom") {
+      var minus = document.createElement("button");
+      minus.textContent = "−";
+      minus.onclick = function () { api("/api/zoom", { layerId: target.id, factor: 1 / 1.25 }); };
+      ctl.appendChild(minus);
+    }
+    var slider = document.createElement("input");
     slider.type = "range";
-    // The minimum can be below 1 where an ultra-wide is part of the logical camera, so it comes
-    // from the device rather than being assumed.
-    slider.min = layer.zoom.min;
-    slider.max = layer.zoom.max;
-    slider.step = 0.01;
-    slider.style.flex = "1";
-    // While a finger is on the slider the incoming value must not fight it.
-    slider.addEventListener("pointerdown", function () { zoomHeld = true; });
-    slider.addEventListener("pointerup", function () { zoomHeld = false; });
-    slider.addEventListener("pointercancel", function () { zoomHeld = false; });
+    slider.min = c.min;
+    slider.max = c.max;
+    slider.step = c.step || "any";
+    slider.disabled = !c.enabled;
+    var hold = function (on) { return function () { camHeld[c.key] = on; }; };
+    slider.addEventListener("pointerdown", hold(true));
+    slider.addEventListener("pointerup", hold(false));
+    slider.addEventListener("pointercancel", hold(false));
+    slider.addEventListener("blur", hold(false));
     slider.oninput = function () {
-      setZoomLabel(parseFloat(slider.value));
-      sendZoom(layer.id, parseFloat(slider.value));
+      var v = parseFloat(slider.value);
+      value.textContent = fmtControl(c, v);
+      sendCamera(target.id, c.key, v);
     };
-
-    var plus = document.createElement("button");
-    plus.textContent = "+";
-    plus.onclick = function () { nudge(layer.id, 1.25); };
-
-    var label = document.createElement("div");
-    label.id = "zoomValue";
-    label.className = "muted";
-    label.style.minWidth = "48px";
-    label.style.textAlign = "right";
-
-    row.appendChild(minus);
-    row.appendChild(slider);
-    row.appendChild(plus);
-    row.appendChild(label);
-    box.appendChild(row);
+    ctl.appendChild(slider);
+    if (c.key === "zoom") {
+      var plus = document.createElement("button");
+      plus.textContent = "+";
+      plus.onclick = function () { api("/api/zoom", { layerId: target.id, factor: 1.25 }); };
+      ctl.appendChild(plus);
+    }
+    var value = document.createElement("span");
+    value.className = "unit cam-value";
+    ctl.appendChild(value);
+  } else if (c.type === "action") {
+    var a = document.createElement("button");
+    a.textContent = c.label;
+    a.onclick = function () {
+      if (c.key !== "reset") { sendCamera(target.id, c.key, true); return; }
+      confirmDialog("Back to automatic?", "Put " + target.label + " back on automatic. Its remembered zoom, focus, exposure and white balance are cleared.", c.label, true)
+        .then(function (yes) { if (yes) sendCamera(target.id, c.key, null); });
+    };
+    label.textContent = "";
+    ctl.appendChild(a);
   }
-
-  // Follow the phone unless the operator is holding the slider.
-  if (slider && !zoomHeld) {
-    slider.value = layer.zoom.ratio;
-    setZoomLabel(layer.zoom.ratio);
+  if (!c.enabled && c.reason) {
+    var why = document.createElement("div");
+    why.className = "sub";
+    why.textContent = c.reason;
+    row.appendChild(why);
+  } else if (c.key === "torch") {
+    var torchNote = document.createElement("div");
+    torchNote.className = "sub";
+    torchNote.textContent = "Not remembered";
+    row.appendChild(torchNote);
   }
+  return row;
 }
 
-function setZoomLabel(value) {
-  var el = document.getElementById("zoomValue");
-  if (el) el.textContent = (Math.round(value * 100) / 100) + "x";
+/** Values only, in place: the controls keep their place and a held one is left alone. */
+function updateCamera(box, target) {
+  target.controls.forEach(function (c) {
+    if (camHeld[c.key]) return;
+    var row = box.querySelector('.cam-field[data-key="' + c.key + '"]');
+    if (!row) return;
+    if (c.type === "choice") {
+      var buttons = row.querySelectorAll(".seg button");
+      for (var i = 0; i < buttons.length; i++) {
+        buttons[i].className = buttons[i].dataset.value === c.value ? "on" : "";
+      }
+      var select = row.querySelector("select");
+      if (select) select.value = c.value === null || c.value === undefined ? "" : c.value;
+    } else if (c.type === "toggle") {
+      var t = row.querySelector("button.toggle");
+      t.className = "toggle" + (c.value ? " on" : "");
+      t.textContent = c.value ? "On" : "Off";
+    } else if (c.type === "range") {
+      var slider = row.querySelector("input");
+      var v = typeof c.value === "number" ? c.value : c.min;
+      slider.value = v;
+      row.querySelector(".cam-value").textContent = fmtControl(c, v);
+    }
+  });
 }
 
 /**
- * A step the operator can actually see. The old 10% step was barely visible, and the page gave
- * no feedback at all, so the buttons looked dead even when they worked.
+ * Coalesced per control: one request in flight, the newest value wins. One POST per slider
+ * movement queued dozens, and a later one could land before an earlier.
  */
-function nudge(layerId, factor) {
-  var l = layerById(layerId);
-  if (l && l.zoom) {
-    var next = Math.min(Math.max(l.zoom.ratio * factor, l.zoom.min), l.zoom.max);
-    l.zoom.ratio = next;
-    setZoomLabel(next);
-    var slider = document.querySelector("#zoomBox input");
-    if (slider) slider.value = next;
-  }
-  api("/api/zoom", { layerId: layerId, factor: factor });
-}
-
-/**
- * Coalesced like the drag rectangles: one request in flight, the newest value wins. Firing one
- * POST per slider movement queued dozens of them, and a later one could land before an earlier.
- */
-function sendZoom(layerId, ratio) {
-  pendingZoom = { layerId: layerId, ratio: ratio };
-  if (zoomInFlight) return;
-  zoomInFlight = true;
-  var payload = pendingZoom;
-  pendingZoom = null;
-  api("/api/zoom", payload).catch(function () {}).then(function () {
-    zoomInFlight = false;
-    if (pendingZoom) sendZoom(pendingZoom.layerId, pendingZoom.ratio);
+function sendCamera(targetId, key, value) {
+  var id = targetId + "|" + key;
+  camPending[id] = { target: targetId, key: key, value: value };
+  if (camInFlight[id]) return;
+  camInFlight[id] = true;
+  var payload = camPending[id];
+  delete camPending[id];
+  api("/api/camera", payload).catch(function () {}).then(function () {
+    camInFlight[id] = false;
+    var next = camPending[id];
+    if (next) sendCamera(next.target, next.key, next.value);
   });
 }
 

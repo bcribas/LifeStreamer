@@ -220,14 +220,16 @@ class CameraControlManager(
 
     /**
      * The target [id] names: a layer, [SINGLE], or null for the main one (the primary layer, or
-     * the one camera). A layer id without a composition, as an older page sends, is the camera.
+     * the one camera). "main" without a composition is the one camera too, as older pages send
+     * it; any other name that is not a camera in use is none.
      */
     private fun resolve(id: String?): Target? {
         ordered.firstOrNull { it.id == id }?.let { return it }
-        val primary = composition.composite?.layoutFlow?.value?.primaryLayer?.id
-        return ordered.firstOrNull { it.id == primary } ?: ordered.firstOrNull()?.takeIf {
-            id == null || composition.composite == null
-        }
+        if (id != null && id != SINGLE && id != MAIN_LAYER) return null
+        val composite = composition.composite ?: return ordered.firstOrNull()
+        if (id == MAIN_LAYER) return null
+        val primary = composite.layoutFlow.value.primaryLayer?.id
+        return ordered.firstOrNull { it.id == primary } ?: ordered.firstOrNull()
     }
 
     private suspend fun <T> onManager(block: () -> T): T =
@@ -388,6 +390,8 @@ class CameraControlManager(
 
         /** The target id of the one camera when there is no composition. */
         const val SINGLE = "camera"
+
+        private const val MAIN_LAYER = com.dimadesu.lifestreamer.composition.CompositionLayers.MAIN
 
         private const val SAVE_DEBOUNCE_MS = 500L
 
