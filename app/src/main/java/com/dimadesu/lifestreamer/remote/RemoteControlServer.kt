@@ -86,6 +86,12 @@ class RemoteControlServer(
         fun setPreviewShortEdge(shortEdge: Int?)
         fun setPreviewFpsCap(maxFps: Int?)
         fun onLockdown()
+
+        /**
+         * A battery temperature to act on instead of the real one (null: the real one again),
+         * for the bench. False when this build does not allow it.
+         */
+        fun setDebugBatteryC(celsius: Float?): Boolean = false
     }
 
     private val gson = Gson()
@@ -591,6 +597,17 @@ class RemoteControlServer(
     private fun handleCommand(request: Request, output: BufferedOutputStream) {
         when (request.path) {
             "/api/state" -> respondJson(output, 200, buildState())
+
+            "/api/debug/thermal" -> {
+                val celsius = runCatching {
+                    (gson.fromJson(request.body, Map::class.java)?.get("batC") as? Number)?.toFloat()
+                }.getOrNull()
+                if (hooks.setDebugBatteryC(celsius)) {
+                    respondJson(output, 200, RemoteDto.OkResponse(true))
+                } else {
+                    respondJson(output, 404, RemoteDto.ErrorResponse("not_found"))
+                }
+            }
 
             "/api/layout/preset" -> {
                 val id = parse<RemoteDto.PresetRequest>(request.body)?.presetId

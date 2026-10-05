@@ -85,6 +85,38 @@ class CompositionSources(private val application: Application) {
         )
     }
 
+    /**
+     * What a camera layer shows while the phone cools down, said to the viewers as well: the
+     * operator asked for "celular quente" on the live rather than a test card.
+     */
+    val hotBitmap: Bitmap by lazy { renderHotBitmap() }
+
+    private fun renderHotBitmap(): Bitmap {
+        val bitmap = Bitmap.createBitmap(960, 540, Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(bitmap)
+        canvas.drawColor(android.graphics.Color.rgb(24, 24, 28))
+        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            color = android.graphics.Color.WHITE
+            textAlign = android.graphics.Paint.Align.CENTER
+            typeface = android.graphics.Typeface.DEFAULT_BOLD
+        }
+        paint.textSize = 150f
+        canvas.drawText("🌡", 480f, 230f, paint)
+        paint.textSize = 96f
+        canvas.drawText("Celular quente", 480f, 370f, paint)
+        paint.textSize = 52f
+        paint.typeface = android.graphics.Typeface.DEFAULT
+        paint.color = android.graphics.Color.rgb(200, 200, 200)
+        canvas.drawText("câmera pausada para esfriar", 480f, 450f, paint)
+        return bitmap
+    }
+
+    /** The heat card in [layer], keeping its place. */
+    fun hotSpec(layer: VideoLayer) = LayerSpec(
+        layer = layer,
+        childFactory = BitmapSourceFactory(hotBitmap, withNoise = false)
+    )
+
     fun mainLayer() = VideoLayer(
         id = CompositionLayers.MAIN,
         z = 0,

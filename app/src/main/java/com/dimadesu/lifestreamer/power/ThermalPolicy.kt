@@ -50,16 +50,18 @@ interface ThermalActuator {
 /**
  * Turns thermal readings into actions, conservatively.
  *
- * The rule that governs everything here: **nothing it does automatically may touch what goes out**.
- * No encoder reconfiguration, no bitrate, and above all never `stopStream()` — the OS throttles
- * CPU and GPU by itself and the stream degrades, whereas ending it is the one outcome an operator
- * cannot recover from in the field.
+ * Here only what the operator sees on the phone changes (the preview, the meters), never what goes
+ * out, and never `stopStream()`: ending a live is the one outcome an operator cannot recover from
+ * in the field. What goes out is HeatGuard's, in steps the operator chose; its step is also a
+ * floor for the level here ([minimumLevel]), as the phone's thermal status alone said too little.
  */
 class ThermalPolicy(
     private val scope: CoroutineScope,
     private val monitor: ThermalMonitor,
     private val isEnabled: () -> Boolean,
-    private val isMountedMode: () -> Boolean
+    private val isMountedMode: () -> Boolean,
+    /** At least this level, whatever the phone's status says (HeatGuard's step). */
+    private val minimumLevel: () -> ThermalLevel = { ThermalLevel.NONE }
 ) {
     var actuator: ThermalActuator? = null
         set(value) {
@@ -128,7 +130,7 @@ class ThermalPolicy(
             return
         }
 
-        val level = monitor.stateFlow.value.level
+        val level = maxOf(monitor.stateFlow.value.level, minimumLevel())
         if (level != candidateLevel) {
             candidateLevel = level
             candidateSinceMs = now

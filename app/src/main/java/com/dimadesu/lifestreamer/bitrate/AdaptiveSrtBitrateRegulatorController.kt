@@ -43,7 +43,7 @@ class AdaptiveSrtBitrateRegulatorController {
                 null
             }
 
-            // Choose factory based on selected mode
+            // Choose factory based on selected mode. Every target goes through the heat ceiling.
             val factory: SrtBitrateRegulator.Factory = when (mode) {
                 RegulatorMode.BELABOX -> object : SrtBitrateRegulator.Factory {
                     override fun newBitrateRegulator(
@@ -55,7 +55,7 @@ class AdaptiveSrtBitrateRegulatorController {
                         return BelaboxSrtBelaRegulator(
                             metricsTracker,
                             bitrateRegulatorConfig,
-                            onVideoTargetBitrateChange,
+                            { onVideoTargetBitrateChange(BitrateCeiling.clamp(it)) },
                             srtPayloadSize
                         )
                     }
@@ -71,7 +71,7 @@ class AdaptiveSrtBitrateRegulatorController {
                             metricsTracker = metricsTracker,
                             bitrateRegulatorConfig = bitrateRegulatorConfig,
                             moblinConfig = moblinConfig,
-                            onVideoTargetBitrateChange = onVideoTargetBitrateChange
+                            onVideoTargetBitrateChange = { onVideoTargetBitrateChange(BitrateCeiling.clamp(it)) }
                         )
                         regulator.setSettings(mode == RegulatorMode.MOBLIN_FAST)
                         return regulator

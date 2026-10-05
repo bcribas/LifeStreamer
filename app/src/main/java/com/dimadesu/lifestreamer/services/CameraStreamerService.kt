@@ -246,7 +246,47 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
             scope = serviceScope,
             monitor = thermalMonitor,
             isEnabled = { isThermalBackoffEnabled },
-            isMountedMode = { isMountedMode }
+            isMountedMode = { isMountedMode },
+            // Warm: the preview off; hot: the screen's meters too
+            minimumLevel = {
+                when (heatGuard.rung.value) {
+                    0 -> com.dimadesu.lifestreamer.power.ThermalLevel.NONE
+                    1 -> com.dimadesu.lifestreamer.power.ThermalLevel.SEVERE
+                    else -> com.dimadesu.lifestreamer.power.ThermalLevel.CRITICAL
+                }
+            }
+        )
+    }
+
+    /**
+     * Gives up fps, bitrate, the second camera and at last the composition as the battery heats
+     * up, before Samsung's guard closes the app (see HeatGuard).
+     */
+    val heatGuard by lazy {
+        com.dimadesu.lifestreamer.power.HeatGuard(
+            scope = serviceScope,
+            readBatteryC = { com.dimadesu.lifestreamer.power.BatteryTemperature.read(this) },
+            composition = compositionController,
+            sources = sourceController,
+            videoSource = { (streamer as? IWithVideoSource)?.videoInput?.sourceFlow?.value },
+            configuredFps = {
+                (streamer as? IVideoSingleStreamer)?.videoConfigFlow?.value?.let { it.cameraFps ?: it.fps } ?: 30
+            },
+            clampEncoder = { bps ->
+                (streamer as? IVideoSingleStreamer)?.videoEncoder?.let { encoder ->
+                    if (encoder.bitrate > bps) encoder.bitrate = bps
+                }
+            },
+            restoreEncoder = {
+                val video = streamer as? IVideoSingleStreamer
+                // A regulator raises it again by itself; without one, the configured bitrate
+                if (video != null && video.bitrateRegulatorControllerFactory == null) {
+                    video.videoConfigFlow.value?.startBitrate?.let { video.videoEncoder?.bitrate = it }
+                }
+            },
+            isEnabled = { isThermalBackoffEnabled },
+            journal = diagnostics,
+            tell = { compositionController.tell(it) }
         )
     }
     private val streamConfigurationHelper by lazy { StreamConfigurationHelper(storageRepository) }
@@ -861,6 +901,7 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         }.onFailure { Log.w(TAG, "Could not watch the network: ${it.message}") }
         thermalMonitor.start()
         thermalPolicy.start()
+        heatGuard.start()
 
         // Remote control, same shape as Moblink: settings flow in, manager starts and stops.
         serviceScope.launch {
@@ -1159,6 +1200,15 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                 thermalPolicy.onManualOverride()
             }
             notePreviewState(previewEnabledState, previewShortEdgeState, maxFps, byThermal = false)
+        }
+
+        override fun setDebugBatteryC(celsius: Float?): Boolean {
+            // Debug builds only: a release build never acts on a made-up temperature
+            if (applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE == 0) return false
+            heatGuard.batteryOverrideC = celsius
+            diagnostics.event("heat", "debug battery override: $celsius")
+            heatGuard.checkNow()
+            return true
         }
 
         override fun onLockdown() {

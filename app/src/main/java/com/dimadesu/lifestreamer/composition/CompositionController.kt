@@ -478,6 +478,50 @@ class CompositionController(
         Log.i(TAG, "Layer $layerId degraded to the placeholder: $reason")
     }
 
+    /** Camera layers paused because the phone is hot, given back when it cools down. */
+    private val heatPaused = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * Pauses every camera layer but the 🔊 one, showing the heat card instead: two cameras at
+     * once are the most expensive thing a composition does. Each layer keeps its choice, for
+     * [resumeCamerasAfterHeat]. Returns the layers paused.
+     */
+    suspend fun pauseCamerasForHeat(): Result<List<String>> = structural {
+        val target = composite ?: return@structural emptyList()
+        val primary = target.layoutFlow.value.primaryLayer?.id
+        val paused = mutableListOf<String>()
+        _layerChoices.value.forEach { (id, choice) ->
+            if (id == primary || choice !is SourceChoice.Camera || id in _placeholders.value) return@forEach
+            val layer = target.layoutFlow.value[id] ?: return@forEach
+            target.replaceLayerSource(id, sources.hotSpec(layer))
+            cappedLayers.remove(id)
+            setPlaceholder(id, HEAT_REASON)
+            heatPaused += id
+            paused += id
+        }
+        if (paused.isNotEmpty()) {
+            _messages.tryEmit("Phone is hot: ${paused.joinToString { positionName(it) }} camera paused")
+            sourcesChanged()
+            _layersInvalidated.tryEmit(Unit)
+            Log.i(TAG, "Paused for heat: $paused")
+        }
+        paused
+    }
+
+    /**
+     * Puts back the cameras paused for heat, where the layer still waits for it: one the operator
+     * has given another source meanwhile keeps that.
+     */
+    suspend fun resumeCamerasAfterHeat() {
+        val ids = heatPaused.toList()
+        heatPaused.clear()
+        ids.forEach { id ->
+            val choice = _layerChoices.value[id] ?: return@forEach
+            if (placeholderReason(id) != HEAT_REASON) return@forEach
+            setLayerSource(id, choice)
+        }
+    }
+
     /** The same for the layer showing [choice], from a place that cannot wait. */
     fun degradeLater(choice: SourceChoice, reason: String) {
         val layerId = layerWith(choice) ?: return
@@ -881,6 +925,9 @@ class CompositionController(
 
     companion object {
         private const val TAG = "CompositionController"
+
+        /** Why a camera layer shows the heat card. */
+        const val HEAT_REASON = "Phone is hot: camera paused until it cools down"
 
         /** How close to an edge or the centre a dragged layer snaps, in canvas fractions. */
         private const val SNAP_THRESHOLD = 0.02f
