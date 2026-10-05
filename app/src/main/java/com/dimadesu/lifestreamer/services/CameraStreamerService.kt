@@ -91,6 +91,9 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         /** Renewed at half this while streaming; see [acquireWakeLock]. */
         private const val WAKE_LOCK_TIMEOUT_MS = 30 * 60_000L
 
+        /** How often a live's stats go to the journal. */
+        private const val JOURNAL_STATS_MS = 10_000L
+
         const val TAG = "CameraStreamerService"
         const val ACTION_STOP_STREAM = "com.dimadesu.lifestreamer.action.STOP_STREAM"
         const val ACTION_START_STREAM = "com.dimadesu.lifestreamer.action.START_STREAM"
@@ -310,6 +313,9 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         }
     }
 
+    /** What happened during lives, kept on the phone for a look afterwards. */
+    val diagnostics by lazy { com.dimadesu.lifestreamer.diagnostics.DiagnosticsLog(this, serviceScope) }
+
     /**
      * The SRT endpoint that reconnects underneath the encoders, used for SRT and SRTLA when
      * enabled. One instance for the service's life, reopened for every live.
@@ -364,6 +370,15 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         streaming: Boolean
     ) {
         if (!isResilientSessionActive) return
+        diagnostics.event(
+            "link", when (link) {
+                is io.github.thibaultbee.streampack.ext.srt.elements.endpoints.resilient.SrtLinkState.Connecting ->
+                    "connecting attempt=${link.attempt} reconnect=${link.everConnected} last=${link.lastError}"
+                is io.github.thibaultbee.streampack.ext.srt.elements.endpoints.resilient.SrtLinkState.Connected ->
+                    "connected #${link.epoch}"
+                else -> link.toString()
+            } + " streaming=$streaming"
+        )
         when (link) {
             is io.github.thibaultbee.streampack.ext.srt.elements.endpoints.resilient.SrtLinkState.Connecting -> {
                 _linkDown.value = true
@@ -794,16 +809,50 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
             }.collect { resilientLinkEnabled = it }
         }
         serviceScope.launch {
+            streamer.isStreamingFlow.collect { live ->
+                diagnostics.event("live", if (live) "on" else "off")
+            }
+        }
+        serviceScope.launch {
+            thermalMonitor.stateFlow.map { it.level }.distinctUntilChanged().collect { level ->
+                diagnostics.event(
+                    "heat",
+                    "level=$level batC=${com.dimadesu.lifestreamer.power.BatteryTemperature.read(this@CameraStreamerService)}"
+                )
+            }
+        }
+        serviceScope.launch {
             combine(resilientSrtEndpoint.linkStateFlow, streamer.isStreamingFlow) { link, streaming ->
                 link to streaming
             }.collect { (link, streaming) -> onLinkState(link, streaming) }
         }
         // A network that just came up (Wi-Fi back, a new Starlink path) is worth trying at once
-        // rather than at the end of the backoff.
+        // rather than at the end of the backoff. A socket stays on the network it was opened on:
+        // when the default network goes away or becomes another one, the live's link moves at
+        // once instead of waiting for the old socket to time out.
         runCatching {
             val callback = object : android.net.ConnectivityManager.NetworkCallback() {
+                @Volatile
+                private var current: android.net.Network? = null
+
                 override fun onAvailable(network: android.net.Network) {
-                    if (isResilientSessionActive) resilientSrtEndpoint.retryNow()
+                    val previous = current
+                    current = network
+                    diagnostics.event("network", "default network $network (was $previous)")
+                    if (!isResilientSessionActive) return
+                    if (previous != null && previous != network) {
+                        Log.i(TAG, "The default network changed: the live's link moves to it")
+                        resilientSrtEndpoint.networkChanged()
+                    } else {
+                        resilientSrtEndpoint.retryNow()
+                    }
+                }
+
+                override fun onLost(network: android.net.Network) {
+                    if (network != current) return
+                    current = null
+                    diagnostics.event("network", "default network $network lost")
+                    if (isResilientSessionActive) resilientSrtEndpoint.networkChanged()
                 }
             }
             getSystemService(android.net.ConnectivityManager::class.java)
@@ -1402,6 +1451,7 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                             )
                         )
                     }
+                    if (isStreamingNow) journalStats(videoEncoderRef, videoBitrate)
                     val notificationKey = parts.key(serviceStatus, isCurrentlyMuted())
                     if (notificationKey == lastNotificationKey) {
                         delay(2000)
@@ -1419,6 +1469,46 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                 delay(2000)
             }
         }
+    }
+
+    private var lastJournalStatsMs = 0L
+
+    /** Every ten seconds of a live, what goes out and how hot the phone is, to the journal. */
+    private fun journalStats(
+        encoder: io.github.thibaultbee.streampack.core.elements.encoders.IEncoder?,
+        bitrate: Int?,
+    ) {
+        val now = System.currentTimeMillis()
+        if (now - lastJournalStatsMs < JOURNAL_STATS_MS) return
+        lastJournalStatsMs = now
+        val fps = runCatching { encoder?.getStats()?.outputFps }.getOrNull()
+        val srt = runCatching {
+            (resilientSrtEndpoint.metrics as? io.github.thibaultbee.streampack.ext.srt.elements.endpoints.SrtEndpointMetrics)
+                ?.rawMetrics?.bstatsOrNull(false)
+        }.getOrNull()
+        val thermal = thermalMonitor.stateFlow.value
+        diagnostics.event(
+            "stats",
+            buildString {
+                append("fps=").append(fps?.let { "%.1f".format(java.util.Locale.US, it) })
+                append(" kbps=").append(bitrate?.div(1000))
+                if (isResilientSessionActive) {
+                    append(" link=").append(resilientSrtEndpoint.linkStateFlow.value.javaClass.simpleName)
+                    append(" droppedKB=").append(resilientSrtEndpoint.bytesDropped / 1024)
+                }
+                srt?.let {
+                    append(" rttMs=").append(it.msRTT.toInt())
+                    append(" sendMbps=").append("%.2f".format(java.util.Locale.US, it.mbpsSendRate))
+                    append(" sndBufMs=").append(it.msSndBuf)
+                    append(" flight=").append(it.pktFlightSize)
+                    append(" retrans=").append(it.pktRetrans)
+                    append(" sndDrop=").append(it.pktSndDrop)
+                }
+                append(" heat=").append(thermal.level)
+                if (!thermal.headroom.isNaN()) append(" headroom=").append("%.2f".format(java.util.Locale.US, thermal.headroom))
+                append(" batC=").append(com.dimadesu.lifestreamer.power.BatteryTemperature.read(this@CameraStreamerService))
+            }
+        )
     }
 
     private fun stopStatusUpdater() {
