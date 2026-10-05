@@ -682,6 +682,7 @@ class CompositionController(
         feeds.values.forEach { it.release() }
         feeds.clear()
         cappedLayers.clear()
+        heatPaused.clear()
         _placeholders.value = emptyMap()
         sourcesChanged()
         Log.i(TAG, "Composition off, back to camera $cameraId")

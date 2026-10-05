@@ -854,10 +854,11 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
             }
         }
         serviceScope.launch {
+            // The phone's own thermal status, apart from HeatGuard's steps ("heat")
             thermalMonitor.stateFlow.map { it.level }.distinctUntilChanged().collect { level ->
                 diagnostics.event(
-                    "heat",
-                    "level=$level batC=${com.dimadesu.lifestreamer.power.BatteryTemperature.read(this@CameraStreamerService)}"
+                    "status",
+                    "android=$level batC=${com.dimadesu.lifestreamer.power.BatteryTemperature.read(this@CameraStreamerService)}"
                 )
             }
         }
@@ -1554,7 +1555,8 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                     append(" retrans=").append(it.pktRetrans)
                     append(" sndDrop=").append(it.pktSndDrop)
                 }
-                append(" heat=").append(thermal.level)
+                append(" step=").append(heatGuard.rung.value)
+                append(" android=").append(thermal.level)
                 if (!thermal.headroom.isNaN()) append(" headroom=").append("%.2f".format(java.util.Locale.US, thermal.headroom))
                 append(" batC=").append(com.dimadesu.lifestreamer.power.BatteryTemperature.read(this@CameraStreamerService))
             }
