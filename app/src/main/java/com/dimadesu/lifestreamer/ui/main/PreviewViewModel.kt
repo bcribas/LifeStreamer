@@ -352,10 +352,15 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
     }.asLiveData()
 
     /**
-     * Test bitmap for [BitmapSource].
+     * Test bitmap for [BitmapSource]: the whole picture while an RTMP or USB source is away.
+     * At its own 1920×1080, not scaled up by the screen's density (about 5000×2800 on this
+     * phone, four noisy copies of it, redrawn by the CPU 30 times a second).
      */
     private val testBitmap =
-        BitmapFactory.decodeResource(application.resources, R.drawable.img_test)
+        BitmapFactory.decodeResource(
+            application.resources, R.drawable.img_test,
+            BitmapFactory.Options().apply { inScaled = false }
+        )
 
     /**
      * UVC Camera helper for USB camera access

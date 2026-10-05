@@ -68,9 +68,21 @@ data class LayerBuild(val spec: LayerSpec, val placeholderReason: String? = null
  * ViewModel was out of its reach.
  */
 class CompositionSources(private val application: Application) {
-    /** Also the placeholder: a bitmap source cannot fail, which makes it a safe terminal state. */
+    /**
+     * Also the placeholder: a bitmap source cannot fail, which makes it a safe terminal state.
+     *
+     * At half size and without the screen's density: a layer is small, and decoded the default
+     * way the 1920×1080 image came out at about 5000×2800 on this phone, redrawn 30 times a
+     * second by the CPU, a third of a core for a still picture.
+     */
     val testBitmap: Bitmap by lazy {
-        BitmapFactory.decodeResource(application.resources, R.drawable.img_test)
+        BitmapFactory.decodeResource(
+            application.resources, R.drawable.img_test,
+            BitmapFactory.Options().apply {
+                inScaled = false
+                inSampleSize = 2
+            }
+        )
     }
 
     fun mainLayer() = VideoLayer(
@@ -92,7 +104,7 @@ class CompositionSources(private val application: Application) {
     /** The test image in [layer], keeping its place. */
     fun placeholderSpec(layer: VideoLayer) = LayerSpec(
         layer = layer,
-        childFactory = BitmapSourceFactory(testBitmap)
+        childFactory = BitmapSourceFactory(testBitmap, withNoise = false)
     )
 
     /**
