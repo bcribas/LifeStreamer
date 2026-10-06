@@ -25,6 +25,94 @@
         app:title="@string/dim_while_live_title"
         app:summary="@string/dim_while_live_summary" />
 
+    <PreferenceCategory app:title="@string/heat_steps_category_title">
+
+        <Preference
+            app:key="@string/heat_steps_summary_key"
+            app:selectable="false"
+            app:title="@string/heat_steps_summary_title" />
+
+        <SeekBarPreference
+            app:key="@string/heat_step1_c_key"
+            app:title="@string/heat_step1_c_title"
+            app:summary="@string/heat_step1_c_summary"
+            app:defaultValue="44"
+            app:min="35"
+            android:max="58"
+            app:showSeekBarValue="true" />
+
+        <SeekBarPreference
+            app:key="@string/heat_step2_c_key"
+            app:title="@string/heat_step2_c_title"
+            app:summary="@string/heat_step2_c_summary"
+            app:defaultValue="47"
+            app:min="36"
+            android:max="59"
+            app:showSeekBarValue="true" />
+
+        <SeekBarPreference
+            app:key="@string/heat_step3_c_key"
+            app:title="@string/heat_step3_c_title"
+            app:summary="@string/heat_step3_c_summary"
+            app:defaultValue="50"
+            app:min="37"
+            android:max="60"
+            app:showSeekBarValue="true" />
+
+        <SeekBarPreference
+            app:key="@string/heat_warm_fps_key"
+            app:title="@string/heat_warm_fps_title"
+            app:defaultValue="24"
+            app:min="10"
+            android:max="30"
+            app:showSeekBarValue="true" />
+
+        <SeekBarPreference
+            app:key="@string/heat_hot_fps_key"
+            app:title="@string/heat_hot_fps_title"
+            app:defaultValue="20"
+            app:min="10"
+            android:max="30"
+            app:showSeekBarValue="true" />
+
+        <SeekBarPreference
+            app:key="@string/heat_warm_kbps_key"
+            app:title="@string/heat_warm_kbps_title"
+            app:defaultValue="4000"
+            app:min="500"
+            android:max="10000"
+            app:seekBarIncrement="500"
+            app:showSeekBarValue="true" />
+
+        <SeekBarPreference
+            app:key="@string/heat_hot_kbps_key"
+            app:title="@string/heat_hot_kbps_title"
+            app:defaultValue="3000"
+            app:min="500"
+            android:max="10000"
+            app:seekBarIncrement="500"
+            app:showSeekBarValue="true" />
+
+        <SeekBarPreference
+            app:key="@string/heat_cool_margin_key"
+            app:title="@string/heat_cool_margin_title"
+            app:summary="@string/heat_cool_margin_summary"
+            app:defaultValue="3"
+            app:min="1"
+            android:max="10"
+            app:showSeekBarValue="true" />
+
+        <SeekBarPreference
+            app:key="@string/heat_cool_hold_key"
+            app:title="@string/heat_cool_hold_title"
+            app:summary="@string/heat_cool_hold_summary"
+            app:defaultValue="3"
+            app:min="1"
+            android:max="15"
+            app:showSeekBarValue="true" />
+
+    </PreferenceCategory>
+
     <Preference
         app:key="@string/battery_optimization_key"
         app:title="@string/battery_optimization_title" />

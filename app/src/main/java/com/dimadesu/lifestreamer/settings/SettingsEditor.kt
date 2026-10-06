@@ -306,8 +306,8 @@ class SettingsEditor(private val context: Context, private val host: Host = Idle
                     max = range.last
                 }
                 if (number < min || number > max) throw Refused("Must be between $min and $max")
-                // Every INT setting here is a bitrate in kb/s
-                return SettingsRules.snapBitrateKbps(number).coerceIn(min, max)
+                // A bitrate snaps to round steps; degrees, frame rates and minutes are taken as given
+                return if (field.unit == "kbps") SettingsRules.snapBitrateKbps(number).coerceIn(min, max) else number
             }
 
             Type.STRING -> {
@@ -402,6 +402,23 @@ class SettingsEditor(private val context: Context, private val host: Host = Idle
             if (newTarget != target) {
                 SettingsSchema.fields.first { it.keyRes == targetRes }.let { values[key(it)] = newTarget; accepted[it] = newTarget }
                 warnings += "Target bitrate raised to $newTarget kbps to stay above the minimum"
+            }
+        }
+
+        // The heat steps keep rising, the ones not set moving out of the way of the one set
+        val stepKeys = listOf(R.string.heat_step1_c_key, R.string.heat_step2_c_key, R.string.heat_step3_c_key)
+        val setStep = stepKeys.indexOfFirst { res -> accepted.keys.any { it.keyRes == res } }
+        if (setStep >= 0) {
+            val defaults = com.dimadesu.lifestreamer.power.HeatConfig.DEFAULT_STEPS_C
+            val steps = stepKeys.mapIndexed { i, res -> values[key(res)] as? Int ?: defaults[i] }
+            val (ordered, moved) = com.dimadesu.lifestreamer.power.HeatConfig.orderSteps(steps, setStep)
+            if (moved) {
+                ordered.forEachIndexed { i, value ->
+                    if (value != steps[i]) {
+                        SettingsSchema.fields.first { it.keyRes == stepKeys[i] }.let { values[key(it)] = value; accepted[it] = value }
+                    }
+                }
+                warnings += "Heat steps moved to keep them rising: ${ordered.joinToString(" / ")} °C"
             }
         }
 

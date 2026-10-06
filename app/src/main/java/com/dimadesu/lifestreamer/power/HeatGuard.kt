@@ -18,13 +18,26 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
+/** The heat step in force in this process, for screens with no line to the service (Settings). */
+object HeatStatus {
+    @Volatile
+    var step = 0
+
+    @Volatile
+    var batteryC: Float? = null
+
+    @Volatile
+    var text: String = HeatConfig().describe(0)
+}
+
 /**
  * Gives up what costs the most heat, in steps, before Samsung's own guard closes the app (it did
- * on 2026-10-05, with the battery at 55 °C and the live gone). The operator chose what may go:
+ * on 2026-10-05, with the battery at 55 °C and the live gone). The operator chose what may go,
+ * and sets where and how much in Settings > Power ([HeatConfig]):
  *
- * 1. (battery ≥ 44 °C) the cameras at 24 fps, the bitrate at most 4 Mbps, the preview off;
- * 2. (≥ 47 °C) every camera layer but the 🔊 one shows "Celular quente" instead, 20 fps, 3 Mbps;
- * 3. (≥ 50 °C) the composition off: one source.
+ * 1. the cameras at a lower frame rate, a bitrate ceiling, the preview off;
+ * 2. every camera layer but the 🔊 one shows "Celular quente" instead, a lower rate and ceiling;
+ * 3. the composition off: one source.
  *
  * It acts on a change of step only, never re-asserting: an operator who turns a camera back on
  * is obeyed until the next step. Coming back is slow on purpose (see [HeatLadder]).
@@ -45,6 +58,8 @@ class HeatGuard(
     private val isEnabled: () -> Boolean,
     private val journal: DiagnosticsLog,
     private val tell: (String) -> Unit,
+    /** The steps as set now; read at every check. */
+    private val config: () -> HeatConfig = { HeatConfig() },
 ) {
     private val ladder = HeatLadder()
     private val mutex = Mutex()
@@ -57,6 +72,14 @@ class HeatGuard(
     /** A battery reading to use instead of the real one, for the bench (debug builds only). */
     @Volatile
     var batteryOverrideC: Float? = null
+
+    /** The battery's temperature at the last check, °C. */
+    @Volatile
+    var lastBatteryC: Float? = null
+        private set
+
+    /** What the step in force gives up, in the operator's words. */
+    fun describeNow(): String = config().normalized().describe(_rung.value)
 
     private var fpsCap: Int? = null
     private var compositionOffForHeat = false
@@ -94,34 +117,50 @@ class HeatGuard(
 
     private suspend fun tick() = mutex.withLock {
         val batteryC = batteryOverrideC ?: readBatteryC()
+        lastBatteryC = batteryC
+        val steps = config().normalized()
+        ladder.config = steps
         val from = _rung.value
         val to = if (isEnabled()) ladder.update(batteryC, System.currentTimeMillis()) else 0
+        HeatStatus.batteryC = batteryC
+        HeatStatus.step = to
+        HeatStatus.text = steps.describe(to)
         if (to == from) {
-            // A camera opened since (a source switch) starts at its configured rate
-            if (fpsCap != null) applyFps()
+            // A camera opened since (a source switch) starts at its configured rate; the settings
+            // may have changed the step's rate or ceiling
+            if (to > 0) applyLimits(to, steps)
             return@withLock
         }
         _rung.value = to
         journal.event("heat", "step $from -> $to batC=$batteryC${if (batteryOverrideC != null) " (override)" else ""}")
         Log.i(TAG, "Heat step $from -> $to at $batteryC °C")
-        apply(from, to)
+        apply(from, to, steps)
     }
 
-    private suspend fun apply(from: Int, to: Int) {
-        fpsCap = when {
-            to >= 2 -> FPS_HOT
-            to >= 1 -> FPS_WARM
+    /** The frame rate and bitrate ceiling of [step]; nothing changes when they are already set. */
+    private suspend fun applyLimits(step: Int, steps: HeatConfig) {
+        val fps = when {
+            step >= 2 -> steps.hotFps
+            step >= 1 -> steps.warmFps
             else -> null
         }
-        applyFps()
-
+        if (fps != fpsCap || fps != null) {
+            fpsCap = fps
+            applyFps()
+        }
         val ceiling = when {
-            to >= 2 -> CEILING_HOT_BPS
-            to >= 1 -> CEILING_WARM_BPS
+            step >= 2 -> steps.hotKbps * 1000
+            step >= 1 -> steps.warmKbps * 1000
             else -> null
         }
-        BitrateCeiling.bps = ceiling
-        if (ceiling != null) clampEncoder(ceiling) else restoreEncoder()
+        if (ceiling != BitrateCeiling.bps) {
+            BitrateCeiling.bps = ceiling
+            if (ceiling != null) clampEncoder(ceiling) else restoreEncoder()
+        }
+    }
+
+    private suspend fun apply(from: Int, to: Int, steps: HeatConfig) {
+        applyLimits(to, steps)
 
         if (to >= 3 && from < 3 && composition.isCompositionActive) {
             sources.disableComposition()
@@ -144,12 +183,8 @@ class HeatGuard(
         }
 
         tell(
-            when (to) {
-                0 -> "Phone has cooled down: back to full quality"
-                1 -> "Phone is warm: ${FPS_WARM} fps, at most ${CEILING_WARM_BPS / 1_000_000} Mbps, preview off"
-                2 -> "Phone is hot: second camera paused, ${FPS_HOT} fps, at most ${CEILING_HOT_BPS / 1_000_000} Mbps"
-                else -> "Phone is very hot: composition off to keep the live going"
-            }
+            if (to == 0) "Phone has cooled down: back to full quality"
+            else "Heat step $to (battery ${steps.stepsC[to - 1]} °C): ${steps.describe(to)}"
         )
     }
 
@@ -172,9 +207,5 @@ class HeatGuard(
     private companion object {
         const val TAG = "HeatGuard"
         const val TICK_MS = 10_000L
-        const val FPS_WARM = 24
-        const val FPS_HOT = 20
-        const val CEILING_WARM_BPS = 4_000_000
-        const val CEILING_HOT_BPS = 3_000_000
     }
 }

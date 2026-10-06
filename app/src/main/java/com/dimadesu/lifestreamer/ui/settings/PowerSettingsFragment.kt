@@ -17,6 +17,52 @@ class PowerSettingsFragment : BaseSettingsFragment() {
 
     override fun onPreferencesInflated() {
         loadPowerSettings()
+        keepHeatStepsRising()
+    }
+
+    override fun onViewCreated(view: android.view.View, savedInstanceState: android.os.Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+        // What each step gives up follows the settings; where the phone stands now, every few seconds
+        collectWhileStarted(
+            kotlinx.coroutines.flow.combine(
+                storageRepository.heatConfigFlow,
+                kotlinx.coroutines.flow.flow {
+                    while (true) {
+                        emit(Unit)
+                        kotlinx.coroutines.delay(5_000)
+                    }
+                }
+            ) { config, _ -> config }
+        ) { config -> showHeatSteps(config) }
+    }
+
+    private fun showHeatSteps(config: com.dimadesu.lifestreamer.power.HeatConfig) {
+        val battery = com.dimadesu.lifestreamer.power.HeatStatus.batteryC
+            ?: com.dimadesu.lifestreamer.power.BatteryTemperature.read(requireContext())
+        val step = com.dimadesu.lifestreamer.power.HeatStatus.step
+        val now = "Now: battery ${battery?.let { "%.1f °C".format(java.util.Locale.US, it) } ?: "unknown"}, " +
+                if (step == 0) "no step in force" else "step $step: ${com.dimadesu.lifestreamer.power.HeatStatus.text}"
+        pref<Preference>(R.string.heat_steps_summary_key).summary = now + "\n\n" + config.summary()
+    }
+
+    /**
+     * The three steps keep rising: moving one moves the others out of its way, as on the remote
+     * page.
+     */
+    private fun keepHeatStepsRising() {
+        val keys = listOf(R.string.heat_step1_c_key, R.string.heat_step2_c_key, R.string.heat_step3_c_key)
+        val prefs = keys.map { pref<androidx.preference.SeekBarPreference>(it) }
+        prefs.forEachIndexed { index, preference ->
+            preference.setOnPreferenceChangeListener { _, newValue ->
+                val steps = prefs.map { it.value }.toMutableList()
+                steps[index] = newValue as Int
+                val (ordered, moved) = com.dimadesu.lifestreamer.power.HeatConfig.orderSteps(steps, index)
+                if (moved) {
+                    ordered.forEachIndexed { i, value -> if (i != index) prefs[i].value = value }
+                }
+                true
+            }
+        }
     }
 
     override fun onResume() {
@@ -45,7 +91,9 @@ class PowerSettingsFragment : BaseSettingsFragment() {
                 } else {
                     ""
                 }
-                "Thermal status: $level$saver"
+                val battery = com.dimadesu.lifestreamer.power.BatteryTemperature.read(requireContext())
+                "Thermal status: $level" +
+                        (battery?.let { " · battery %.1f °C".format(java.util.Locale.US, it) } ?: "") + saver
             } else {
                 "This device cannot report its temperature (needs Android 10)."
             }

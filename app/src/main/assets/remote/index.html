@@ -815,7 +815,14 @@ function renderThermal(t) {
     parts.push("headroom " + Math.round(t.headroom * 100) + "%");
   }
   if (t.powerSaveMode) parts.push("battery saver ON");
+  if (t.batteryC !== null && t.batteryC !== undefined) parts.push("battery " + t.batteryC.toFixed(1) + " °C");
   var html = parts.join(" · ");
+  // The heat steps (Settings > Power): which one is in force, and what it gives up
+  if (t.heatSteps && t.heatSteps.length === 3) {
+    var step = t.heatStep || 0;
+    html += '<div class="muted">Heat step ' + step + " of 3 (" + t.heatSteps.join(" / ") + " °C): " +
+      (t.heatStepText || "") + "</div>";
+  }
   if (t.appliedActions && t.appliedActions.length) {
     html += '<div class="muted">' + t.appliedActions.join(" · ") + "</div>";
   }

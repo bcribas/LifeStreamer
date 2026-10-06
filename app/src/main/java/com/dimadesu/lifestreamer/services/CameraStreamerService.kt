@@ -288,9 +288,14 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
             },
             isEnabled = { isThermalBackoffEnabled },
             journal = diagnostics,
-            tell = { compositionController.tell(it) }
+            tell = { compositionController.tell(it) },
+            config = { heatConfig }
         )
     }
+
+    /** The heat steps as set in Settings > Power. */
+    @Volatile
+    private var heatConfig = com.dimadesu.lifestreamer.power.HeatConfig()
     private val streamConfigurationHelper by lazy { StreamConfigurationHelper(storageRepository) }
 
     /**
@@ -843,6 +848,14 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
             storageRepository.mountedModeFlow.collect { isMountedMode = it }
         }
         serviceScope.launch {
+            storageRepository.heatConfigFlow.collect { config ->
+                heatConfig = config
+                diagnostics.event("heat", "steps ${config.stepsC.joinToString("/")} °C, fps ${config.warmFps}/${config.hotFps}, " +
+                        "ceiling ${config.warmKbps}/${config.hotKbps} kbps, back after ${config.coolHoldMinutes} min at -${config.coolMarginC} °C")
+                RemoteControlManager.broadcastState()
+            }
+        }
+        serviceScope.launch {
             combine(
                 storageRepository.resilientSrtLinkFlow,
                 storageRepository.recordingConfigFlow
@@ -905,6 +918,7 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         thermalMonitor.start()
         thermalPolicy.start()
         heatGuard.start()
+        serviceScope.launch { heatGuard.rung.collect { RemoteControlManager.broadcastState() } }
 
         // Remote control, same shape as Moblink: settings flow in, manager starts and stops.
         serviceScope.launch {
@@ -1167,7 +1181,11 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                 headroom = state.headroom.takeIf { !it.isNaN() }?.let { Math.round(it * 100f) / 100f },
                 powerSaveMode = state.isPowerSaveMode,
                 supported = state.isSupported,
-                appliedActions = thermalPolicy.appliedActionsFlow.value
+                appliedActions = thermalPolicy.appliedActionsFlow.value,
+                batteryC = heatGuard.lastBatteryC?.let { Math.round(it * 10f) / 10f },
+                heatStep = heatGuard.rung.value,
+                heatStepText = heatGuard.describeNow(),
+                heatSteps = heatConfig.stepsC
             )
         }
 

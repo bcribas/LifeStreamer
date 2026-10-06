@@ -413,6 +413,26 @@ class DataStoreRepository(
         preferences[booleanPreferencesKey(context.getString(R.string.thermal_backoff_key))] ?: true
     }.distinctUntilChanged()
 
+    /** What the app gives up at each heat step, as set in Settings > Power (see HeatConfig). */
+    val heatConfigFlow: Flow<com.dimadesu.lifestreamer.power.HeatConfig> = dataStore.data.map { preferences ->
+        fun int(keyRes: Int, default: Int) =
+            preferences[intPreferencesKey(context.getString(keyRes))] ?: default
+        val defaults = com.dimadesu.lifestreamer.power.HeatConfig()
+        com.dimadesu.lifestreamer.power.HeatConfig(
+            stepsC = listOf(
+                int(R.string.heat_step1_c_key, defaults.stepsC[0]),
+                int(R.string.heat_step2_c_key, defaults.stepsC[1]),
+                int(R.string.heat_step3_c_key, defaults.stepsC[2]),
+            ),
+            warmFps = int(R.string.heat_warm_fps_key, defaults.warmFps),
+            hotFps = int(R.string.heat_hot_fps_key, defaults.hotFps),
+            warmKbps = int(R.string.heat_warm_kbps_key, defaults.warmKbps),
+            hotKbps = int(R.string.heat_hot_kbps_key, defaults.hotKbps),
+            coolMarginC = int(R.string.heat_cool_margin_key, defaults.coolMarginC),
+            coolHoldMinutes = int(R.string.heat_cool_hold_key, defaults.coolHoldMinutes),
+        ).normalized()
+    }.distinctUntilChanged()
+
     /** Phone mounted out of reach: preview off, dark screen, sustained clocks. */
     val mountedModeFlow: Flow<Boolean> = dataStore.data.map { preferences ->
         preferences[booleanPreferencesKey(context.getString(R.string.mounted_mode_key))] ?: false

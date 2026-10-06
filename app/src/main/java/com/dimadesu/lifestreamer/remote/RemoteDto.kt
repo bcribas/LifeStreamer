@@ -209,7 +209,14 @@ object RemoteDto {
         val headroom: Float?,
         val powerSaveMode: Boolean,
         val supported: Boolean,
-        val appliedActions: List<String>
+        val appliedActions: List<String>,
+        /** The battery's temperature, which decides the heat step, °C. */
+        val batteryC: Float? = null,
+        /** The heat step in force (0 to 3) and what it gives up; see HeatConfig. */
+        val heatStep: Int = 0,
+        val heatStepText: String? = null,
+        /** The battery temperatures of steps 1, 2 and 3. */
+        val heatSteps: List<Int> = emptyList()
     )
 
     // Requests

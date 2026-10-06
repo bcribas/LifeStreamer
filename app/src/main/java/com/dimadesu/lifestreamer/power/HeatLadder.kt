@@ -1,38 +1,36 @@
 package com.dimadesu.lifestreamer.power
 
 /**
- * How hot the phone is, in rungs the app acts on, from the battery's temperature.
+ * How hot the phone is, in steps the app acts on, from the battery's temperature and the steps
+ * in [config] (Settings > Power, see [HeatConfig]).
  *
- * Calibrated on the S20 FE: on 2026-10-05 Samsung's own heat guard closed the app with the
- * battery at 55 °C, after climbing about half a degree a minute. The rungs start ten degrees and
- * some ten minutes before that, so what the app gives up has time to bend the curve.
- *
- * Up at once, to the highest rung the temperature reaches. Down one rung at a time, only after
- * [coolHoldMs] at [coolMarginC] below the rung: a camera going off and on is worse than staying
- * degraded. Pure, so it is tested on the JVM.
+ * Up at once, to the highest step the temperature reaches. Down one step at a time, only after
+ * [HeatConfig.coolHoldMinutes] at [HeatConfig.coolMarginC] below the step: a camera going off and
+ * on is worse than staying degraded. Pure, so it is tested on the JVM.
  */
 class HeatLadder(
-    private val thresholdsC: List<Float> = THRESHOLDS_C,
-    private val coolMarginC: Float = 3f,
-    private val coolHoldMs: Long = 3 * 60_000L,
+    /** Read on every update: a change in the settings applies at the next reading. */
+    @Volatile var config: HeatConfig = HeatConfig(),
 ) {
     var rung = 0
         private set
 
     private var coolSinceMs: Long? = null
 
-    /** The rung for [batteryC] at [nowMs]; an unknown temperature changes nothing. */
+    /** The step for [batteryC] at [nowMs]; an unknown temperature changes nothing. */
     fun update(batteryC: Float?, nowMs: Long): Int {
         if (batteryC == null) return rung
-        val reached = thresholdsC.count { batteryC >= it }
+        val steps = config.normalized()
+        val thresholds = steps.stepsC
+        val reached = thresholds.count { batteryC >= it }
         if (reached > rung) {
             rung = reached
             coolSinceMs = null
             return rung
         }
-        if (rung > 0 && batteryC <= thresholdsC[rung - 1] - coolMarginC) {
+        if (rung > 0 && batteryC <= thresholds[rung - 1] - steps.coolMarginC) {
             val since = coolSinceMs ?: nowMs.also { coolSinceMs = it }
-            if (nowMs - since >= coolHoldMs) {
+            if (nowMs - since >= steps.coolHoldMinutes * 60_000L) {
                 rung--
                 coolSinceMs = null
             }
@@ -40,10 +38,5 @@ class HeatLadder(
             coolSinceMs = null
         }
         return rung
-    }
-
-    companion object {
-        /** Battery °C for rungs 1, 2 and 3. */
-        val THRESHOLDS_C = listOf(44f, 47f, 50f)
     }
 }
