@@ -92,7 +92,7 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         private const val WAKE_LOCK_TIMEOUT_MS = 30 * 60_000L
 
         /** How often a live's stats go to the journal. */
-        private const val JOURNAL_STATS_MS = 10_000L
+        private const val JOURNAL_STATS_MS = 5_000L
 
         const val TAG = "CameraStreamerService"
         const val ACTION_STOP_STREAM = "com.dimadesu.lifestreamer.action.STOP_STREAM"
@@ -1552,6 +1552,11 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
 
     private var lastJournalStatsMs = 0L
 
+    /** The SRT counters at the last journal line, for what happened in between. */
+    private var lastSentBytes = 0L
+    private var lastRetrans = 0
+    private var lastSndDrop = 0
+
     /** Every ten seconds of a live, what goes out and how hot the phone is, to the journal. */
     private fun journalStats(
         encoder: io.github.thibaultbee.streampack.core.elements.encoders.IEncoder?,
@@ -1576,12 +1581,24 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                     append(" droppedKB=").append(resilientSrtEndpoint.bytesDropped / 1024)
                 }
                 srt?.let {
+                    // Since the last line, not since the connection: a new socket starts its
+                    // counters again, which shows as a counter going down
+                    if (it.byteSentTotal < lastSentBytes) {
+                        lastSentBytes = 0
+                        lastRetrans = 0
+                        lastSndDrop = 0
+                    }
+                    val seconds = JOURNAL_STATS_MS / 1000.0
                     append(" rttMs=").append(it.msRTT.toInt())
-                    append(" sendMbps=").append("%.2f".format(java.util.Locale.US, it.mbpsSendRate))
+                    append(" sendKbps=").append(((it.byteSentTotal - lastSentBytes) * 8 / 1000.0 / seconds).toInt())
+                    append(" maxBwMbps=").append("%.1f".format(java.util.Locale.US, it.mbpsMaxBW))
                     append(" sndBufMs=").append(it.msSndBuf)
                     append(" flight=").append(it.pktFlightSize)
-                    append(" retrans=").append(it.pktRetrans)
-                    append(" sndDrop=").append(it.pktSndDrop)
+                    append(" retrans=").append(it.pktRetransTotal - lastRetrans)
+                    append(" sndDrop=").append(it.pktSndDropTotal - lastSndDrop)
+                    lastSentBytes = it.byteSentTotal
+                    lastRetrans = it.pktRetransTotal
+                    lastSndDrop = it.pktSndDropTotal
                 }
                 append(" step=").append(heatGuard.rung.value)
                 append(" android=").append(thermal.level)
