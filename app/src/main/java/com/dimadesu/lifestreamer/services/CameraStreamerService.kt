@@ -356,7 +356,7 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
     }
 
     /** What happened during lives, kept on the phone for a look afterwards. */
-    val diagnostics by lazy { com.dimadesu.lifestreamer.diagnostics.DiagnosticsLog(this, serviceScope) }
+    val diagnostics by lazy { com.dimadesu.lifestreamer.diagnostics.DiagnosticsLog(this) }
 
     /**
      * The SRT endpoint that reconnects underneath the encoders, used for SRT and SRTLA when
@@ -1284,7 +1284,6 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         try { thermalPolicy.stop() } catch (_: Throwable) {}
         try { thermalMonitor.stop() } catch (_: Throwable) {}
         try { heatGuard.stop() } catch (_: Throwable) {}
-        try { compositionController.release() } catch (_: Throwable) {}
 
         // Ensure audio passthrough is stopped - Quit from notification may call
         // Activity.finishAndRemoveTask() which doesn't always guarantee the
@@ -1320,6 +1319,10 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         // Everything this instance started stops with it. Left running, its loops kept acting on
         // the released streamer after a Quit, next to a new service's (see HeatGuard.stop).
         serviceScope.cancel()
+        // After the scope: nothing can be dispatched to its thread any more
+        try { compositionController.release() } catch (_: Throwable) {}
+        diagnostics.event("service", "stopped")
+        diagnostics.close()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

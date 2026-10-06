@@ -19,15 +19,18 @@ import java.util.Locale
  *
  * One file per day in the app's files (`diagnostics/journal-YYYY-MM-DD.log`), the last
  * [KEEP_DAYS] days kept. Writing happens on its own coroutine: a caller never waits for storage.
+ * That coroutine is not the service's, so what happens while the service goes away still lands;
+ * [close] lets it finish what is queued and end.
  */
-class DiagnosticsLog(context: Context, scope: CoroutineScope) {
+class DiagnosticsLog(context: Context) {
+    private val scope = CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
     private val dir = File(context.filesDir, "diagnostics")
     private val lines = Channel<String>(capacity = 1024, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     private val time = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     private val day = SimpleDateFormat("yyyy-MM-dd", Locale.US)
 
     init {
-        scope.launch(Dispatchers.IO) {
+        scope.launch {
             runCatching { dir.mkdirs() }
             prune()
             for (line in lines) {
@@ -42,6 +45,11 @@ class DiagnosticsLog(context: Context, scope: CoroutineScope) {
     fun event(kind: String, text: String) {
         val stamp = synchronized(time) { time.format(Date()) }
         lines.trySend("$stamp $kind $text")
+    }
+
+    /** Writes what is queued, then stops; later events are dropped. */
+    fun close() {
+        lines.close()
     }
 
     private fun prune() {
