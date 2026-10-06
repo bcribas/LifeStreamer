@@ -689,6 +689,16 @@ class CompositionController(
         bottom?.takeUnless { it is SourceChoice.Camera || it == SourceChoice.TestImage }
     }
 
+    /**
+     * The service is going away: the RTMP feeds' players go, and the thread every change ran on.
+     * Its scope is the service's, cancelled with it.
+     */
+    fun release() {
+        feeds.values.forEach { it.release() }
+        feeds.clear()
+        confinementExecutor.shutdown()
+    }
+
     /** Whether two cameras can run at the same time on this phone. */
     fun canRunTogether(a: String, b: String): Boolean = capabilities.canRunTogether(a, b)
 

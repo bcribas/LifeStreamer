@@ -79,7 +79,8 @@ class RtmpLayerFeed(
         retryJob?.cancel()
         val last = player
         player = null
-        scope.launch(Dispatchers.Main) {
+        // Not on the scope: the player goes even when the service's scope has been cancelled
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
             stallJob?.cancel()
             last?.let { dispose(it) }
             Log.i(TAG, "RTMP $index feed released")

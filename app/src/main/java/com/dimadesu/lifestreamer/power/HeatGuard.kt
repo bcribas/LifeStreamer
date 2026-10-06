@@ -61,17 +61,30 @@ class HeatGuard(
     private var fpsCap: Int? = null
     private var compositionOffForHeat = false
 
+    private val jobs = mutableListOf<kotlinx.coroutines.Job>()
+
     fun start() {
-        scope.launch {
+        jobs += scope.launch {
             while (isActive) {
                 runCatching { tick() }.onFailure { Log.w(TAG, "Heat check failed: ${it.message}", it) }
                 delay(TICK_MS)
             }
         }
         // A camera that opens again starts at its configured rate: the cap goes back on
-        scope.launch {
+        jobs += scope.launch {
             composition.sourcesVersion.collect { runCatching { applyFps() } }
         }
+    }
+
+    /**
+     * Stops for good, with the service. One left running after the service went (its scope was
+     * never cancelled) changed the frame rate of a camera the old service had released: that
+     * opened camera 0 again and the camera service took it from the live, on 2026-10-05.
+     */
+    fun stop() {
+        jobs.forEach { it.cancel() }
+        jobs.clear()
+        BitrateCeiling.bps = null
     }
 
     /** Checks now, e.g. after a new override. */
@@ -149,11 +162,12 @@ class HeatGuard(
         }
     }
 
+    /** The cameras running now; one that is not is left alone. */
     private fun cameras(): List<ICameraSource> = when (val source = videoSource()) {
         is ICameraSource -> listOf(source)
         is ICompositeVideoSource -> source.layoutFlow.value.layers.mapNotNull { source.childSource(it.id) as? ICameraSource }
         else -> emptyList()
-    }
+    }.filter { (it as? io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSourceInternal)?.isStreamingFlow?.value == true }
 
     private companion object {
         const val TAG = "HeatGuard"

@@ -1281,6 +1281,8 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         try { livePreview.release() } catch (_: Throwable) {}
         try { thermalPolicy.stop() } catch (_: Throwable) {}
         try { thermalMonitor.stop() } catch (_: Throwable) {}
+        try { heatGuard.stop() } catch (_: Throwable) {}
+        try { compositionController.release() } catch (_: Throwable) {}
 
         // Ensure audio passthrough is stopped - Quit from notification may call
         // Activity.finishAndRemoveTask() which doesn't always guarantee the
@@ -1313,6 +1315,9 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         }
 
         super.onDestroy()
+        // Everything this instance started stops with it. Left running, its loops kept acting on
+        // the released streamer after a Quit, next to a new service's (see HeatGuard.stop).
+        serviceScope.cancel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {

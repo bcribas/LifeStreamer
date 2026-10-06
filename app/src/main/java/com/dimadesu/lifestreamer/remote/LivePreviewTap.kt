@@ -12,6 +12,7 @@ import io.github.thibaultbee.streampack.core.pipelines.inputs.IVideoInput
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -169,7 +170,8 @@ class LivePreviewTap(
 
     fun release() {
         idleJob?.cancel()
-        scope.launch {
+        // To the end even when the service's scope is cancelled right after, as onDestroy does
+        scope.launch(NonCancellable) {
             mutex.withLock { detach() }
             thread.quitSafely()
         }
