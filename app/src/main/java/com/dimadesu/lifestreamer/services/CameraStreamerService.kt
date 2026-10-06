@@ -273,15 +273,17 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                 (streamer as? IVideoSingleStreamer)?.videoConfigFlow?.value?.let { it.cameraFps ?: it.fps } ?: 30
             },
             clampEncoder = { bps ->
-                (streamer as? IVideoSingleStreamer)?.videoEncoder?.let { encoder ->
-                    if (encoder.bitrate > bps) encoder.bitrate = bps
+                runCatching {
+                    (streamer as? IVideoSingleStreamer)?.videoEncoder?.let { encoder ->
+                        if (encoder.bitrate > bps) encoder.bitrate = bps
+                    }
                 }
             },
             restoreEncoder = {
                 val video = streamer as? IVideoSingleStreamer
                 // A regulator raises it again by itself; without one, the configured bitrate
                 if (video != null && video.bitrateRegulatorControllerFactory == null) {
-                    video.videoConfigFlow.value?.startBitrate?.let { video.videoEncoder?.bitrate = it }
+                    runCatching { video.videoConfigFlow.value?.startBitrate?.let { video.videoEncoder?.bitrate = it } }
                 }
             },
             isEnabled = { isThermalBackoffEnabled },

@@ -55,7 +55,7 @@ class AdaptiveSrtBitrateRegulatorController {
                         return BelaboxSrtBelaRegulator(
                             metricsTracker,
                             bitrateRegulatorConfig,
-                            { onVideoTargetBitrateChange(BitrateCeiling.clamp(it)) },
+                            { BitrateCeiling.apply(it, onVideoTargetBitrateChange) },
                             srtPayloadSize
                         )
                     }
@@ -71,7 +71,7 @@ class AdaptiveSrtBitrateRegulatorController {
                             metricsTracker = metricsTracker,
                             bitrateRegulatorConfig = bitrateRegulatorConfig,
                             moblinConfig = moblinConfig,
-                            onVideoTargetBitrateChange = { onVideoTargetBitrateChange(BitrateCeiling.clamp(it)) }
+                            onVideoTargetBitrateChange = { BitrateCeiling.apply(it, onVideoTargetBitrateChange) }
                         )
                         regulator.setSettings(mode == RegulatorMode.MOBLIN_FAST)
                         return regulator

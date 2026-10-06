@@ -250,7 +250,8 @@ class RtmpSendDurationBitrateRegulator(
             return RtmpSendDurationBitrateRegulator(
                 metricsTracker,
                 bitrateRegulatorConfig,
-                onVideoTargetBitrateChange
+                // Under the heat ceiling, and harmless on an encoder that stopped under the tick
+                { BitrateCeiling.apply(it, onVideoTargetBitrateChange) }
             )
         }
     }

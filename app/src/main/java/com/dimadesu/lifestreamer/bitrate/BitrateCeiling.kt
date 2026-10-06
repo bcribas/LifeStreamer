@@ -11,4 +11,14 @@ object BitrateCeiling {
 
     /** [requested], or the ceiling when that is lower. */
     fun clamp(requested: Int): Int = bps?.let { minOf(it, requested) } ?: requested
+
+    /**
+     * Gives the regulator's target to the encoder, at most the ceiling. An encoder stopped under
+     * the regulator's last tick (a live ending) throws from MediaCodec.setParameters; that ended
+     * the whole app on 2026-10-05, so it is only logged.
+     */
+    fun apply(requested: Int, toEncoder: (Int) -> Unit) {
+        runCatching { toEncoder(clamp(requested)) }
+            .onFailure { android.util.Log.w("BitrateCeiling", "Bitrate not set, the encoder is gone: ${it.message}") }
+    }
 }
