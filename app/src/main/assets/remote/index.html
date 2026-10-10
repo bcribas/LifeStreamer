@@ -487,7 +487,9 @@ function renderLive(st) {
 
   // Why it stopped, or why it cannot start: the operator is not next to the phone to find out.
   var reason = "";
-  if (st.status === "ERROR" && st.lastError) reason = st.lastError;
+  // No picture while live: a camera the system took, or an encoder getting no frames
+  if (isLiveOrGoing(st) && st.videoProblem) reason = "⚠ " + st.videoProblem;
+  else if (st.status === "ERROR" && st.lastError) reason = st.lastError;
   else if (!isLiveOrGoing(st) && !st.canStart && st.startBlockedReason) reason = st.startBlockedReason;
   else if (!isLiveOrGoing(st) && st.lastError) reason = "Last error: " + st.lastError;
   document.getElementById("liveReason").textContent = reason;
@@ -520,10 +522,13 @@ function renderLiveMeta() {
   if (liveStats.uptimeSec !== null && liveStats.uptimeSec !== undefined) {
     parts.push(formatUptime(liveStats.uptimeSec + Math.floor((Date.now() - liveStatsAt) / 1000)));
   }
-  if (liveStats.bitrateKbps) {
-    parts.push(liveStats.bitrateKbps >= 1000
-      ? (liveStats.bitrateKbps / 1000).toFixed(2) + " Mbps"
-      : liveStats.bitrateKbps + " kb/s");
+  function kbps(v) { return v >= 1000 ? (v / 1000).toFixed(2) + " Mbps" : v + " kb/s"; }
+  // What really goes out, when measured; the encoder's target is no proof of it
+  if (liveStats.sentKbps !== null && liveStats.sentKbps !== undefined) {
+    parts.push(kbps(liveStats.sentKbps) + " sent" +
+      (liveStats.bitrateKbps ? " (target " + kbps(liveStats.bitrateKbps) + ")" : ""));
+  } else if (liveStats.bitrateKbps) {
+    parts.push(kbps(liveStats.bitrateKbps));
   }
   if (liveStats.fps) parts.push(liveStats.fps.toFixed(1) + " fps");
   el.textContent = parts.join(" · ");

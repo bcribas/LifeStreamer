@@ -92,6 +92,26 @@
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintVertical_bias="0.25" />
 
+        <!-- No picture going out: a camera the system took, an encoder without frames -->
+        <TextView
+            android:id="@+id/videoProblemText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginHorizontal="24dp"
+            android:textColor="@android:color/white"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:gravity="center"
+            android:padding="12dp"
+            android:background="#CCB00020"
+            android:text='@{viewmodel.videoProblemLiveData}'
+            app:goneUnless='@{viewmodel.videoProblemLiveData != null}'
+            app:layout_constraintTop_toTopOf="parent"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintVertical_bias="0.38" />
+
         <!-- Audio Debug Info Overlay -->
         <ScrollView
             android:id="@+id/audioDebugOverlay"

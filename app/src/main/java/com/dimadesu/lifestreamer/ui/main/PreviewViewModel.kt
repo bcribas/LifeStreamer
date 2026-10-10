@@ -730,6 +730,10 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
     private val _reconnectionStatusLiveData = MutableLiveData<String?>()
     val reconnectionStatusLiveData: LiveData<String?> = _reconnectionStatusLiveData
 
+    /** Why the live sends no picture now, from the service; null while it does. */
+    private val _videoProblemLiveData = MutableLiveData<String?>()
+    val videoProblemLiveData: LiveData<String?> = _videoProblemLiveData
+
     // Camera information for button creation
     data class CameraInfo(
         val id: String,
@@ -1238,6 +1242,11 @@ class PreviewViewModel(private val application: Application) : ObservableViewMod
                         viewModelScope.launch {
                             svc.reconnectionStatusMessage.collect { message ->
                                 _reconnectionStatusLiveData.postValue(message)
+                            }
+                        }
+                        viewModelScope.launch {
+                            svc.videoProblemFlow.collect { problem ->
+                                _videoProblemLiveData.postValue(problem)
                             }
                         }
                         Log.i(TAG, "Observing centralized reconnection state from service")

@@ -94,6 +94,9 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         /** How often a live's stats go to the journal. */
         private const val JOURNAL_STATS_MS = 5_000L
 
+        /** A repeated "connecting" goes to the journal once in this many attempts (a minute). */
+        private const val LINK_JOURNAL_EVERY = 12
+
         const val TAG = "CameraStreamerService"
         const val ACTION_STOP_STREAM = "com.dimadesu.lifestreamer.action.STOP_STREAM"
         const val ACTION_START_STREAM = "com.dimadesu.lifestreamer.action.START_STREAM"
@@ -417,22 +420,39 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         streaming: Boolean
     ) {
         if (!isResilientSessionActive) return
-        diagnostics.event(
-            "link", when (link) {
-                is io.github.thibaultbee.streampack.ext.srt.elements.endpoints.resilient.SrtLinkState.Connecting ->
-                    "connecting attempt=${link.attempt} reconnect=${link.everConnected} last=${link.lastError}"
-                is io.github.thibaultbee.streampack.ext.srt.elements.endpoints.resilient.SrtLinkState.Connected ->
-                    "connected #${link.epoch}"
-                else -> link.toString()
-            } + " streaming=$streaming"
-        )
+        val noNetwork = !hasDefaultNetwork
+        if (link is io.github.thibaultbee.streampack.ext.srt.elements.endpoints.resilient.SrtLinkState.Connecting) {
+            // Every five seconds for as long as there is no way out: 254 identical lines in 21
+            // minutes on 2026-10-10. A change of error or of network, and once a minute, is enough.
+            val key = "${link.lastError}|$noNetwork|$streaming"
+            if (link.attempt <= 1 || key != lastLinkJournalKey || link.attempt % LINK_JOURNAL_EVERY == 0) {
+                lastLinkJournalKey = key
+                diagnostics.event(
+                    "link",
+                    "connecting attempt=${link.attempt} reconnect=${link.everConnected} last=${link.lastError}" +
+                            (if (noNetwork) " (no network on the phone)" else "") + " streaming=$streaming"
+                )
+            }
+        } else {
+            lastLinkJournalKey = null
+            diagnostics.event(
+                "link", when (link) {
+                    is io.github.thibaultbee.streampack.ext.srt.elements.endpoints.resilient.SrtLinkState.Connected ->
+                        "connected #${link.epoch}"
+                    else -> link.toString()
+                } + " streaming=$streaming"
+            )
+        }
         when (link) {
             is io.github.thibaultbee.streampack.ext.srt.elements.endpoints.resilient.SrtLinkState.Connecting -> {
                 _linkDown.value = true
                 if (!streaming) return
                 linkMessageClearJob?.cancel()
                 val recording = if (recordingController.isActive) " The recording continues." else ""
-                _reconnectionStatusMessage.value = if (link.everConnected) {
+                _reconnectionStatusMessage.value = if (noNetwork) {
+                    // SRT's own words for it are "Bad parameters"
+                    "No network on the phone: waiting for one (attempt ${link.attempt})…$recording"
+                } else if (link.everConnected) {
                     "Connection lost, reconnecting (attempt ${link.attempt})…$recording"
                 } else {
                     "Connecting… (attempt ${link.attempt})" +
@@ -583,7 +603,9 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
     /** Last orientation the sensor reported, or null before the first reading (e.g. lying flat). */
     @Volatile
     private var lastSensorRotation: Int? = null
-    // Current outgoing video bitrate in bits per second (nullable when unknown)
+    // The live's bitrate the phone shows, in bits per second: what the socket sends when that is
+    // measured (SRT), else the encoder's target. The target alone said "4 Mbps" on 2026-10-10
+    // while sound alone went out.
     private val _currentBitrateFlow = MutableStateFlow<Int?>(null)
     val currentBitrateFlow = _currentBitrateFlow.asStateFlow()
     // Encoder stats flow for UI display
@@ -617,6 +639,28 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
     // Reconnection status message for UI display
     private val _reconnectionStatusMessage = MutableStateFlow<String?>(null)
     val reconnectionStatusMessage = _reconnectionStatusMessage.asStateFlow()
+
+    /** Why the live sends no picture now (see [com.dimadesu.lifestreamer.diagnostics.VideoWatch]). */
+    private val _videoProblemFlow = MutableStateFlow<String?>(null)
+    val videoProblemFlow = _videoProblemFlow.asStateFlow()
+    private val videoWatch = com.dimadesu.lifestreamer.diagnostics.VideoWatch()
+
+    /** One collector per camera in use, by source; touched from the status tick only. */
+    private val cameraWatchJobs =
+        mutableMapOf<io.github.thibaultbee.streampack.core.elements.sources.video.camera.ICameraSource, kotlinx.coroutines.Job>()
+
+    private val sendRate = com.dimadesu.lifestreamer.bitrate.SendRate()
+
+    /** What the SRT socket sent per second at the last tick; null when not measured. */
+    @Volatile
+    private var sentBps: Int? = null
+
+    /** Whether the phone has a network at all: without one SRT only says "Bad parameters". */
+    @Volatile
+    private var hasDefaultNetwork = true
+
+    /** What the last "connecting" line of the journal said, to leave out the repeats. */
+    private var lastLinkJournalKey: String? = null
     
     // Signal when user manually stops from notification (for ViewModel to cancel reconnection)
     private val _userStoppedFromNotification = MutableSharedFlow<Unit>(replay = 0)
@@ -894,6 +938,7 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                 override fun onAvailable(network: android.net.Network) {
                     val previous = current
                     current = network
+                    hasDefaultNetwork = true
                     diagnostics.event("network", "default network $network (was $previous)")
                     if (!isResilientSessionActive) return
                     if (previous != null && previous != network) {
@@ -907,6 +952,7 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                 override fun onLost(network: android.net.Network) {
                     if (network != current) return
                     current = null
+                    hasDefaultNetwork = false
                     diagnostics.event("network", "default network $network lost")
                     if (isResilientSessionActive) resilientSrtEndpoint.networkChanged()
                 }
@@ -1113,7 +1159,8 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                 },
                 lastError = _lastStreamError.value,
                 canStart = blocked == null,
-                startBlockedReason = blocked
+                startBlockedReason = blocked,
+                videoProblem = _videoProblemFlow.value
             )
         }
 
@@ -1302,6 +1349,8 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         try { thermalPolicy.stop() } catch (_: Throwable) {}
         try { thermalMonitor.stop() } catch (_: Throwable) {}
         try { heatGuard.stop() } catch (_: Throwable) {}
+        cameraWatchJobs.values.forEach { it.cancel() }
+        cameraWatchJobs.clear()
 
         // Ensure audio passthrough is stopped - Quit from notification may call
         // Activity.finishAndRemoveTask() which doesn't always guarantee the
@@ -1492,8 +1541,15 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                     val videoBitrate = if (isStreamingNow) {
                         videoEncoderRef?.bitrate
                     } else null
+                    sentBps = if (isStreamingNow && isResilientSessionActive) {
+                        sendRate.update(System.currentTimeMillis(), srtBytesSent())
+                    } else {
+                        sendRate.reset()
+                        null
+                    }
+                    watchVideo(videoEncoderRef)
                     // Emit bitrate (or null when not streaming) to flow for UI consumers
-                    try { _currentBitrateFlow.emit(videoBitrate) } catch (_: Throwable) {}
+                    try { _currentBitrateFlow.emit(if (isStreamingNow) sentBps ?: videoBitrate else null) } catch (_: Throwable) {}
                     
                     // Emit encoder stats (or null when not streaming) to flow for UI consumers
                     val encoderStatsText = if (isStreamingNow) {
@@ -1522,6 +1578,7 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                         RemoteControlManager.broadcastStats(
                             RemoteDto.StatsDto(
                                 bitrateKbps = if (live) parts.bitrateBps?.div(1000) else null,
+                                sentKbps = if (live) sentBps?.div(1000) else null,
                                 fps = if (live) parts.fps else null,
                                 uptimeSec = if (live) streamingStartTime?.let { (System.currentTimeMillis() - it) / 1000 } else null,
                                 recordingBytes = recording?.bytesWritten,
@@ -1547,6 +1604,54 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
                 // gated above to happen only when needed.
                 delay(2000)
             }
+        }
+    }
+
+    /** Bytes the live's SRT socket has sent, or null without one. */
+    private fun srtBytesSent(): Long? = runCatching {
+        (resilientSrtEndpoint.metrics as? io.github.thibaultbee.streampack.ext.srt.elements.endpoints.SrtEndpointMetrics)
+            ?.rawMetrics?.bstatsOrNull(false)?.byteSentTotal
+    }.getOrNull()
+
+    /**
+     * Whether the live sends a picture: the cameras the system takes, the encoder's frames. To
+     * the journal, and to [videoProblemFlow] for the phone, the page and the notification.
+     */
+    private fun watchVideo(encoder: io.github.thibaultbee.streampack.core.elements.encoders.IEncoder?) {
+        val cameras = runCatching {
+            com.dimadesu.lifestreamer.sources.camerasIn((streamer as? IWithVideoSource)?.videoInput?.sourceFlow?.value)
+        }.getOrDefault(emptyList())
+        cameraWatchJobs.keys.filter { it !in cameras }.forEach { gone ->
+            cameraWatchJobs.remove(gone)?.cancel()
+            videoWatch.forget(gone)
+        }
+        cameras.filter { it !in cameraWatchJobs }.forEach { camera ->
+            val name = runCatching { compositionController.displayName(camera.cameraId) }.getOrDefault(camera.cameraId)
+            cameraWatchJobs[camera] = serviceScope.launch {
+                camera.interruptionFlow.collect { reason ->
+                    // A camera paused for heat that the system takes is nobody's loss
+                    val streaming = (camera as? io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSourceInternal)
+                        ?.isStreamingFlow?.value == true
+                    if (reason != null && !streaming) return@collect
+                    videoWatch.onCamera(camera, name, reason, System.currentTimeMillis())
+                        ?.let { diagnostics.event("video", it) }
+                    showVideoProblem()
+                }
+            }
+        }
+        val live = runCatching { streamer.isStreamingFlow.value }.getOrDefault(false)
+        val frames = if (live) runCatching { encoder?.getStats()?.outputFrameCount }.getOrNull() else null
+        videoWatch.onTick(System.currentTimeMillis(), live, frames)?.let { diagnostics.event("video", it) }
+        showVideoProblem()
+    }
+
+    private fun showVideoProblem() {
+        val live = runCatching { streamer.isStreamingFlow.value }.getOrDefault(false)
+        val problem = if (live) videoWatch.problem(System.currentTimeMillis()) else null
+        if (problem != _videoProblemFlow.value) {
+            // Every tick while it lasts, as its seconds count: rare, and the operator is away
+            _videoProblemFlow.value = problem
+            runCatching { RemoteControlManager.broadcastState() }
         }
     }
 
@@ -1643,10 +1748,12 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         val bitrateBps: Int? = null,
         val fps: Float? = null,
         /** "● REC", the recording's error, or empty. */
-        val recordingText: String = ""
+        val recordingText: String = "",
+        /** Why no picture goes out, while none does. */
+        val videoProblem: String? = null
     ) {
         fun key(status: StreamStatus, muted: Boolean): String =
-            listOf(status.name, muted, content, bitrateText, fpsText, statusLabel, recordingText)
+            listOf(status.name, muted, content, bitrateText, fpsText, statusLabel, recordingText, videoProblem)
                 .joinToString("|")
     }
 
@@ -1694,24 +1801,29 @@ class CameraStreamerService : StreamerService<ISingleStreamer>(
         val fpsValue = try { videoEncoderRef?.getStats()?.outputFps } catch (_: Throwable) { null }
         val fpsText = fpsValue?.let { "%.1f fps".format(java.util.Locale.US, it) }.orEmpty()
 
-        val bitrateText = videoBitrate?.let { b ->
+        // What the socket sends when measured: the target is no proof anything goes out
+        val shownBitrate = if (status == StreamStatus.STREAMING) sentBps ?: videoBitrate else videoBitrate
+        val bitrateText = shownBitrate?.let { b ->
             if (b >= 1_000_000) String.format(java.util.Locale.US, "%.2f Mbps", b / 1_000_000.0)
             else String.format(java.util.Locale.US, "%d kb/s", b / 1000)
         } ?: ""
 
         val recordingText = recordingNotificationText()
+        val videoProblem = _videoProblemFlow.value
         val baseText = if (status == StreamStatus.STREAMING) {
             val fpsAppend = if (fpsText.isNotEmpty()) " • $fpsText" else ""
             "$content • $bitrateText$fpsAppend"
         } else if (recordingController.isActive && status != StreamStatus.CONNECTING) {
             getString(R.string.status_recording_live_off)
         } else content
-        val finalText = if (recordingText.isEmpty()) baseText else "$baseText • $recordingText"
+        val withProblem = if (videoProblem != null) "⚠ $videoProblem • $baseText" else baseText
+        val finalText = if (recordingText.isEmpty()) withProblem else "$withProblem • $recordingText"
 
         return NotificationContent(
             statusLabel, content, bitrateText, fpsText, finalText,
             bitrateBps = videoBitrate, fps = fpsValue?.toFloat(),
-            recordingText = recordingText
+            recordingText = recordingText,
+            videoProblem = videoProblem
         )
     }
 

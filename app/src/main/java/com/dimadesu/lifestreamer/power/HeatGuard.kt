@@ -7,7 +7,6 @@ import com.dimadesu.lifestreamer.diagnostics.DiagnosticsLog
 import com.dimadesu.lifestreamer.sources.SourceController
 import io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSource
 import io.github.thibaultbee.streampack.core.elements.sources.video.camera.ICameraSource
-import io.github.thibaultbee.streampack.core.elements.sources.video.composite.ICompositeVideoSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -198,11 +197,7 @@ class HeatGuard(
     }
 
     /** The cameras running now; one that is not is left alone. */
-    private fun cameras(): List<ICameraSource> = when (val source = videoSource()) {
-        is ICameraSource -> listOf(source)
-        is ICompositeVideoSource -> source.layoutFlow.value.layers.mapNotNull { source.childSource(it.id) as? ICameraSource }
-        else -> emptyList()
-    }.filter { (it as? io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSourceInternal)?.isStreamingFlow?.value == true }
+    private fun cameras(): List<ICameraSource> = com.dimadesu.lifestreamer.sources.camerasIn(videoSource()).filter { (it as? io.github.thibaultbee.streampack.core.elements.sources.video.IVideoSourceInternal)?.isStreamingFlow?.value == true }
 
     private companion object {
         const val TAG = "HeatGuard"

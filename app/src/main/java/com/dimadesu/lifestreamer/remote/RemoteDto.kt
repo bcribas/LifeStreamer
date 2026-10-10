@@ -126,11 +126,14 @@ object RemoteDto {
         val startedAtMs: Long?,
         val lastError: String?,
         val canStart: Boolean,
-        val startBlockedReason: String?
+        val startBlockedReason: String?,
+        /** Why the live sends no picture now (a camera the system took, no frames); null while it does. */
+        val videoProblem: String? = null
     )
 
     @Keep
     data class StatsDto(
+        /** The encoder's target. */
         val bitrateKbps: Int?,
         val fps: Float?,
         /** Measured on the phone: the browser's clock need not agree with the phone's. */
@@ -138,7 +141,9 @@ object RemoteDto {
         val recordingBytes: Long? = null,
         val recordingFreeMb: Long? = null,
         /** At the rate written so far. */
-        val recordingMinutesLeft: Long? = null
+        val recordingMinutesLeft: Long? = null,
+        /** What the SRT socket really sends, when measured. */
+        val sentKbps: Int? = null
     )
 
     @Keep
